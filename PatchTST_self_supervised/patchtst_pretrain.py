@@ -44,6 +44,7 @@ parser.add_argument('--mask_ratio', type=float, default=0.4, help='masking ratio
 # Optimization args
 parser.add_argument('--n_epochs_pretrain', type=int, default=10, help='number of pre-training epochs')
 parser.add_argument('--lr', type=float, default=1e-4, help='learning rate')
+parser.add_argument('--aux_weight', type=float, default=0.01, help='weight for auxiliary load balancing loss')
 # model id to keep track of the number of models saved
 parser.add_argument('--pretrained_model_id', type=int, default=1, help='id of the saved pretrained model')
 parser.add_argument('--model_type', type=str, default='based_model', help='for multivariate model or univariate model')
@@ -95,17 +96,18 @@ def find_lr():
     dls = get_dls(args)    
     model = get_model(dls.vars, args)
     # get loss
-    loss_func = torch.nn.MSELoss(reduction='mean')
+    loss_func = nn.HuberLoss()
     # get callbacks
     cbs = [RevInCB(dls.vars, denorm=False)] if args.revin else []
     cbs += [PatchMaskCB(patch_len=args.patch_len, stride=args.stride, mask_ratio=args.mask_ratio)]
         
     # define learner
-    learn = Learner(dls, model, 
-                        loss_func, 
-                        lr=args.lr, 
+    learn = Learner(dls, model,
+                        loss_func,
+                        lr=args.lr,
                         cbs=cbs,
-                        )                        
+                        aux_weight=args.aux_weight,
+                        )
     # fit the data to the model
     suggested_lr = learn.lr_finder()
     print('suggested_lr', suggested_lr)
@@ -118,7 +120,7 @@ def pretrain_func(lr=args.lr):
     # get model     
     model = get_model(dls.vars, args)
     # get loss
-    loss_func = torch.nn.MSELoss(reduction='mean')
+    loss_func = nn.HuberLoss()
     # get callbacks
     cbs = [RevInCB(dls.vars, denorm=False)] if args.revin else []
     cbs += [
@@ -127,12 +129,13 @@ def pretrain_func(lr=args.lr):
                         path=args.save_path)
         ]
     # define learner
-    learn = Learner(dls, model, 
-                        loss_func, 
-                        lr=lr, 
+    learn = Learner(dls, model,
+                        loss_func,
+                        lr=lr,
                         cbs=cbs,
                         #metrics=[mse]
-                        )                        
+                        aux_weight=args.aux_weight,
+                        )
     # fit the data to the model
     learn.fit_one_cycle(n_epochs=args.n_epochs_pretrain, lr_max=lr)
 

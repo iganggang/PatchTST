@@ -57,17 +57,17 @@ class PatchTST(nn.Module):
             self.head = ClassificationHead(self.n_vars, d_model, target_dim, head_dropout)
 
 
-    def forward(self, z):                             
+    def forward(self, z):
         """
         z: tensor [bs x num_patch x n_vars x patch_len]
-        """   
-        z = self.backbone(z)                                                                # z: [bs x nvars x d_model x num_patch]
-        z = self.head(z)                                                                    
+        """
+        z, aux_loss = self.backbone(z)                                                     # z: [bs x nvars x d_model x num_patch]
+        z = self.head(z)
         # z: [bs x target_dim x nvars] for prediction
         #    [bs x target_dim] for regression
         #    [bs x target_dim] for classification
         #    [bs x num_patch x n_vars x patch_len] for pretrain
-        return z
+        return z, aux_loss
 
 
 class RegressionHead(nn.Module):
@@ -171,6 +171,53 @@ class PretrainHead(nn.Module):
         return x
 
 
+class SwitchLinear(nn.Module):
+    """Switch-style linear layer with mixture of experts."""
+    def __init__(self, in_features, out_features, n_experts: int = 4):
+        super().__init__()
+        self.n_experts = n_experts
+        self.experts = nn.ModuleList([nn.Linear(in_features, out_features) for _ in range(n_experts)])
+        self.gate = nn.Linear(in_features, n_experts)
+
+    def forward(self, x):
+        gate_logits = self.gate(x)
+        gate = F.softmax(gate_logits, dim=-1)
+        top1 = gate.argmax(dim=-1)
+        one_hot = F.one_hot(top1, self.n_experts).to(x.dtype)
+        expert_outs = torch.stack([expert(x) for expert in self.experts], dim=-1)
+        out = (expert_outs * one_hot.unsqueeze(-2)).sum(-1)
+        meangate = gate.mean(dim=tuple(range(gate.dim() - 1)))
+        aux_loss = (meangate * self.n_experts).pow(2).mean()
+        return out, aux_loss
+
+
+class SwitchFeedForward(nn.Module):
+    """MoE feed-forward layer for Switch Transformer."""
+    def __init__(self, d_model, d_ff, n_experts: int = 4, dropout: float = 0., activation: str = "gelu"):
+        super().__init__()
+        self.n_experts = n_experts
+        self.experts = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model, d_ff),
+                get_activation_fn(activation),
+                nn.Dropout(dropout),
+                nn.Linear(d_ff, d_model)
+            ) for _ in range(n_experts)
+        ])
+        self.gate = nn.Linear(d_model, n_experts)
+
+    def forward(self, x):
+        gate_logits = self.gate(x)
+        gate = F.softmax(gate_logits, dim=-1)
+        top1 = gate.argmax(dim=-1)
+        one_hot = F.one_hot(top1, self.n_experts).to(x.dtype)
+        expert_outs = torch.stack([expert(x) for expert in self.experts], dim=-1)
+        out = (expert_outs * one_hot.unsqueeze(-2)).sum(-1)
+        meangate = gate.mean(dim=(0, 1))
+        aux_loss = (meangate * self.n_experts).pow(2).mean()
+        return out, aux_loss
+
+
 class PatchTSTEncoder(nn.Module):
     def __init__(self, c_in, num_patch, patch_len, 
                  n_layers=3, d_model=128, n_heads=16, shared_embedding=True,
@@ -186,11 +233,10 @@ class PatchTSTEncoder(nn.Module):
         self.shared_embedding = shared_embedding        
 
         # Input encoding: projection of feature vectors onto a d-dim vector space
-        if not shared_embedding: 
-            self.W_P = nn.ModuleList()
-            for _ in range(self.n_vars): self.W_P.append(nn.Linear(patch_len, d_model))
+        if not shared_embedding:
+            self.W_P = nn.ModuleList([SwitchLinear(patch_len, d_model) for _ in range(self.n_vars)])
         else:
-            self.W_P = nn.Linear(patch_len, d_model)      
+            self.W_P = SwitchLinear(patch_len, d_model)
 
         # Positional encoding
         self.W_pos = positional_encoding(pe, learn_pe, num_patch, d_model)
@@ -211,23 +257,25 @@ class PatchTSTEncoder(nn.Module):
         # Input encoding
         if not self.shared_embedding:
             x_out = []
-            for i in range(n_vars): 
-                z = self.W_P[i](x[:,:,i,:])
+            aux_loss = 0.0
+            for i in range(n_vars):
+                z, aux = self.W_P[i](x[:,:,i,:])
+                aux_loss = aux_loss + aux
                 x_out.append(z)
             x = torch.stack(x_out, dim=2)
         else:
-            x = self.W_P(x)                                                      # x: [bs x num_patch x nvars x d_model]
-        x = x.transpose(1,2)                                                     # x: [bs x nvars x num_patch x d_model]        
+            x, aux_loss = self.W_P(x)                                            # x: [bs x num_patch x nvars x d_model]
+        x = x.transpose(1,2)                                                     # x: [bs x nvars x num_patch x d_model]
 
         u = torch.reshape(x, (bs*n_vars, num_patch, self.d_model) )              # u: [bs * nvars x num_patch x d_model]
         u = self.dropout(u + self.W_pos)                                         # u: [bs * nvars x num_patch x d_model]
 
         # Encoder
-        z = self.encoder(u)                                                      # z: [bs * nvars x num_patch x d_model]
+        z, aux2 = self.encoder(u)                                                # z: [bs * nvars x num_patch x d_model]
         z = torch.reshape(z, (-1,n_vars, num_patch, self.d_model))               # z: [bs x nvars x num_patch x d_model]
         z = z.permute(0,1,3,2)                                                   # z: [bs x nvars x d_model x num_patch]
 
-        return z
+        return z, aux_loss + aux2
     
     
 # Cell
@@ -249,12 +297,17 @@ class TSTEncoder(nn.Module):
         """
         output = src
         scores = None
+        aux_loss = 0.0
         if self.res_attention:
-            for mod in self.layers: output, scores = mod(output, prev=scores)
-            return output
+            for mod in self.layers:
+                output, scores, l_aux = mod(output, prev=scores)
+                aux_loss = aux_loss + l_aux
+            return output, aux_loss
         else:
-            for mod in self.layers: output = mod(output)
-            return output
+            for mod in self.layers:
+                output, l_aux = mod(output)
+                aux_loss = aux_loss + l_aux
+            return output, aux_loss
 
 
 
@@ -278,11 +331,8 @@ class TSTEncoderLayer(nn.Module):
         else:
             self.norm_attn = nn.LayerNorm(d_model)
 
-        # Position-wise Feed-Forward
-        self.ff = nn.Sequential(nn.Linear(d_model, d_ff, bias=bias),
-                                get_activation_fn(activation),
-                                nn.Dropout(dropout),
-                                nn.Linear(d_ff, d_model, bias=bias))
+        # Position-wise Feed-Forward replaced with MoE
+        self.ff = SwitchFeedForward(d_model, d_ff, dropout=dropout, activation=activation)
 
         # Add & Norm
         self.dropout_ffn = nn.Dropout(dropout)
@@ -318,16 +368,16 @@ class TSTEncoderLayer(nn.Module):
         if self.pre_norm:
             src = self.norm_ffn(src)
         ## Position-wise Feed-Forward
-        src2 = self.ff(src)
+        src2, aux_loss = self.ff(src)
         ## Add & Norm
         src = src + self.dropout_ffn(src2) # Add: residual connection with residual dropout
         if not self.pre_norm:
             src = self.norm_ffn(src)
 
         if self.res_attention:
-            return src, scores
+            return src, scores, aux_loss
         else:
-            return src
+            return src, aux_loss
 
 
 

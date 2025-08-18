@@ -22,25 +22,26 @@ from unittest.mock import patch
 
 class Learner(GetAttr):
 
-    def __init__(self, dls, model, 
-                        loss_func=None, 
-                        lr=1e-3, 
-                        cbs=None, 
-                        metrics=None, 
+    def __init__(self, dls, model,
+                        loss_func=None,
+                        lr=1e-3,
+                        cbs=None,
+                        metrics=None,
                         opt_func=Adam,
                         **kwargs):
-                
+
         self.model, self.dls, self.loss_func, self.lr = model, dls, loss_func, lr
         self.opt_func = opt_func
-        #self.opt = self.opt_func(self.model.parameters(), self.lr) 
+        self.aux_weight = kwargs.get('aux_weight', 0.01)
+        #self.opt = self.opt_func(self.model.parameters(), self.lr)
         self.set_opt()
-        
+
         self.metrics = metrics
         self.n_inp  = 2
         # self.n_inp = self.dls.train.dataset.n_inp if self.dls else 0
-        # Initialize callbacks                 
-        if cbs and not isinstance(cbs, List): cbs = [cbs]    
-        self.initialize_callbacks(cbs)        
+        # Initialize callbacks
+        if cbs and not isinstance(cbs, List): cbs = [cbs]
+        self.initialize_callbacks(cbs)
         # Indicator of running lr_finder
         self.run_finder = False
 
@@ -174,8 +175,11 @@ class Learner(GetAttr):
         self.xb, self.yb = batch
         # forward
         pred = self.model_forward()
-        # compute loss
-        loss = self.loss_func(pred, self.yb)
+        if isinstance(pred, tuple):
+            pred, aux_loss = pred
+            loss = self.loss_func(pred, self.yb) + self.aux_weight * aux_loss
+        else:
+            loss = self.loss_func(pred, self.yb)
         return pred, loss
 
     def model_forward(self):
@@ -193,9 +197,12 @@ class Learner(GetAttr):
         self.xb, self.yb = batch
         # forward
         pred = self.model_forward()
-        # compute loss
-        loss = self.loss_func(pred, self.yb)
-        return pred, loss                                     
+        if isinstance(pred, tuple):
+            pred, aux_loss = pred
+            loss = self.loss_func(pred, self.yb) + self.aux_weight * aux_loss
+        else:
+            loss = self.loss_func(pred, self.yb)
+        return pred, loss
 
 
     def _do_batch_predict(self):   
@@ -206,7 +213,9 @@ class Learner(GetAttr):
         self.xb, self.yb = batch
         # forward
         pred = self.model_forward()
-        return pred 
+        if isinstance(pred, tuple):
+            pred = pred[0]
+        return pred
     
     def _do_batch_test(self):   
         self.pred, self.yb = self.test_step(self.batch)     
@@ -216,6 +225,8 @@ class Learner(GetAttr):
         self.xb, self.yb = batch
         # forward
         pred = self.model_forward()
+        if isinstance(pred, tuple):
+            pred = pred[0]
         return pred, self.yb
 
 
