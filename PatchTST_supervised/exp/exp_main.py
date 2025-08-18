@@ -22,6 +22,7 @@ warnings.filterwarnings('ignore')
 class Exp_Main(Exp_Basic):
     def __init__(self, args):
         super(Exp_Main, self).__init__(args)
+        self.aux_weight = getattr(args, 'aux_weight', 0.01)
 
     def _build_model(self):
         model_dict = {
@@ -48,7 +49,7 @@ class Exp_Main(Exp_Basic):
         return model_optim
 
     def _select_criterion(self):
-        criterion = nn.MSELoss()
+        criterion = nn.HuberLoss()
         return criterion
 
     def vali(self, vali_data, vali_loader, criterion):
@@ -70,19 +71,26 @@ class Exp_Main(Exp_Basic):
                     with torch.cuda.amp.autocast():
                         if 'Linear' in self.args.model or 'TST' in self.args.model:
                             outputs = self.model(batch_x)
+                            if isinstance(outputs, tuple):
+                                outputs = outputs[0]
                         else:
                             if self.args.output_attention:
                                 outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                             else:
                                 outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                            aux_loss = 0.
                 else:
                     if 'Linear' in self.args.model or 'TST' in self.args.model:
                         outputs = self.model(batch_x)
+                        if isinstance(outputs, tuple):
+                            outputs = outputs[0]
+                        aux_loss = 0.
                     else:
                         if self.args.output_attention:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                         else:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                        aux_loss = 0.
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, f_dim:]
                 batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
@@ -147,6 +155,9 @@ class Exp_Main(Exp_Basic):
                     with torch.cuda.amp.autocast():
                         if 'Linear' in self.args.model or 'TST' in self.args.model:
                             outputs = self.model(batch_x)
+                            aux_loss = 0.
+                            if isinstance(outputs, tuple):
+                                outputs, aux_loss = outputs
                         else:
                             if self.args.output_attention:
                                 outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
@@ -156,22 +167,25 @@ class Exp_Main(Exp_Basic):
                         f_dim = -1 if self.args.features == 'MS' else 0
                         outputs = outputs[:, -self.args.pred_len:, f_dim:]
                         batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-                        loss = criterion(outputs, batch_y)
+                        loss = criterion(outputs, batch_y) + self.aux_weight * aux_loss
                         train_loss.append(loss.item())
                 else:
                     if 'Linear' in self.args.model or 'TST' in self.args.model:
                             outputs = self.model(batch_x)
+                            aux_loss = 0.
+                            if isinstance(outputs, tuple):
+                                outputs, aux_loss = outputs
                     else:
                         if self.args.output_attention:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
-                            
                         else:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, batch_y)
+                        aux_loss = 0.
                     # print(outputs.shape,batch_y.shape)
                     f_dim = -1 if self.args.features == 'MS' else 0
                     outputs = outputs[:, -self.args.pred_len:, f_dim:]
                     batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-                    loss = criterion(outputs, batch_y)
+                    loss = criterion(outputs, batch_y) + self.aux_weight * aux_loss
                     train_loss.append(loss.item())
 
                 if (i + 1) % 100 == 0:
@@ -247,6 +261,8 @@ class Exp_Main(Exp_Basic):
                     with torch.cuda.amp.autocast():
                         if 'Linear' in self.args.model or 'TST' in self.args.model:
                             outputs = self.model(batch_x)
+                            if isinstance(outputs, tuple):
+                                outputs = outputs[0]
                         else:
                             if self.args.output_attention:
                                 outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
@@ -255,6 +271,8 @@ class Exp_Main(Exp_Basic):
                 else:
                     if 'Linear' in self.args.model or 'TST' in self.args.model:
                             outputs = self.model(batch_x)
+                            if isinstance(outputs, tuple):
+                                outputs = outputs[0]
                     else:
                         if self.args.output_attention:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
@@ -338,6 +356,8 @@ class Exp_Main(Exp_Basic):
                     with torch.cuda.amp.autocast():
                         if 'Linear' in self.args.model or 'TST' in self.args.model:
                             outputs = self.model(batch_x)
+                            if isinstance(outputs, tuple):
+                                outputs = outputs[0]
                         else:
                             if self.args.output_attention:
                                 outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
@@ -346,6 +366,8 @@ class Exp_Main(Exp_Basic):
                 else:
                     if 'Linear' in self.args.model or 'TST' in self.args.model:
                         outputs = self.model(batch_x)
+                        if isinstance(outputs, tuple):
+                            outputs = outputs[0]
                     else:
                         if self.args.output_attention:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]

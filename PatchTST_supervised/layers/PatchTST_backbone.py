@@ -71,15 +71,15 @@ class PatchTST_backbone(nn.Module):
         z = z.permute(0,1,3,2)                                                              # z: [bs x nvars x patch_len x patch_num]
         
         # model
-        z = self.backbone(z)                                                                # z: [bs x nvars x d_model x patch_num]
-        z = self.head(z)                                                                    # z: [bs x nvars x target_window] 
+        z, aux_loss = self.backbone(z)                                                      # z: [bs x nvars x d_model x patch_num]
+        z = self.head(z)                                                                    # z: [bs x nvars x target_window]
         
         # denorm
-        if self.revin: 
+        if self.revin:
             z = z.permute(0,2,1)
             z = self.revin_layer(z, 'denorm')
             z = z.permute(0,2,1)
-        return z
+        return z, aux_loss
     
     def create_pretrain_head(self, head_nf, vars, dropout):
         return nn.Sequential(nn.Dropout(dropout),
@@ -121,10 +121,56 @@ class Flatten_Head(nn.Module):
             x = self.linear(x)
             x = self.dropout(x)
         return x
-        
-        
-    
-    
+
+
+
+class SwitchLinear(nn.Module):
+    """Switch-style linear layer with mixture of experts."""
+    def __init__(self, in_features, out_features, n_experts: int = 4):
+        super().__init__()
+        self.n_experts = n_experts
+        self.experts = nn.ModuleList([nn.Linear(in_features, out_features) for _ in range(n_experts)])
+        self.gate = nn.Linear(in_features, n_experts)
+
+    def forward(self, x):
+        gate_logits = self.gate(x)
+        gate = F.softmax(gate_logits, dim=-1)
+        top1 = gate.argmax(dim=-1)
+        one_hot = F.one_hot(top1, self.n_experts).to(x.dtype)
+        expert_outs = torch.stack([expert(x) for expert in self.experts], dim=-1)
+        out = (expert_outs * one_hot.unsqueeze(-2)).sum(-1)
+        meangate = gate.mean(dim=tuple(range(gate.dim() - 1)))
+        aux_loss = (meangate * self.n_experts).pow(2).mean()
+        return out, aux_loss
+
+
+class SwitchFeedForward(nn.Module):
+    """MoE feed-forward layer for Switch Transformer."""
+    def __init__(self, d_model, d_ff, n_experts: int = 4, dropout: float = 0., activation: str = "gelu"):
+        super().__init__()
+        self.n_experts = n_experts
+        self.experts = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model, d_ff),
+                get_activation_fn(activation),
+                nn.Dropout(dropout),
+                nn.Linear(d_ff, d_model)
+            ) for _ in range(n_experts)
+        ])
+        self.gate = nn.Linear(d_model, n_experts)
+
+    def forward(self, x):
+        gate_logits = self.gate(x)
+        gate = F.softmax(gate_logits, dim=-1)
+        top1 = gate.argmax(dim=-1)
+        one_hot = F.one_hot(top1, self.n_experts).to(x.dtype)
+        expert_outs = torch.stack([expert(x) for expert in self.experts], dim=-1)
+        out = (expert_outs * one_hot.unsqueeze(-2)).sum(-1)
+        meangate = gate.mean(dim=(0, 1))
+        aux_loss = (meangate * self.n_experts).pow(2).mean()
+        return out, aux_loss
+
+
 class TSTiEncoder(nn.Module):  #i means channel-independent
     def __init__(self, c_in, patch_num, patch_len, max_seq_len=1024,
                  n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None,
@@ -140,7 +186,7 @@ class TSTiEncoder(nn.Module):  #i means channel-independent
         
         # Input encoding
         q_len = patch_num
-        self.W_P = nn.Linear(patch_len, d_model)        # Eq 1: projection of feature vectors onto a d-dim vector space
+        self.W_P = SwitchLinear(patch_len, d_model)
         self.seq_len = q_len
 
         # Positional encoding
@@ -159,17 +205,17 @@ class TSTiEncoder(nn.Module):  #i means channel-independent
         n_vars = x.shape[1]
         # Input encoding
         x = x.permute(0,1,3,2)                                                   # x: [bs x nvars x patch_num x patch_len]
-        x = self.W_P(x)                                                          # x: [bs x nvars x patch_num x d_model]
+        x, aux1 = self.W_P(x)                                                    # x: [bs x nvars x patch_num x d_model]
 
         u = torch.reshape(x, (x.shape[0]*x.shape[1],x.shape[2],x.shape[3]))      # u: [bs * nvars x patch_num x d_model]
         u = self.dropout(u + self.W_pos)                                         # u: [bs * nvars x patch_num x d_model]
 
         # Encoder
-        z = self.encoder(u)                                                      # z: [bs * nvars x patch_num x d_model]
+        z, aux2 = self.encoder(u)                                                # z: [bs * nvars x patch_num x d_model]
         z = torch.reshape(z, (-1,n_vars,z.shape[-2],z.shape[-1]))                # z: [bs x nvars x patch_num x d_model]
         z = z.permute(0,1,3,2)                                                   # z: [bs x nvars x d_model x patch_num]
-        
-        return z    
+
+        return z, aux1 + aux2
             
             
     
@@ -189,12 +235,17 @@ class TSTEncoder(nn.Module):
     def forward(self, src:Tensor, key_padding_mask:Optional[Tensor]=None, attn_mask:Optional[Tensor]=None):
         output = src
         scores = None
+        aux_loss = 0.0
         if self.res_attention:
-            for mod in self.layers: output, scores = mod(output, prev=scores, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
-            return output
+            for mod in self.layers:
+                output, scores, l_aux = mod(output, prev=scores, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
+                aux_loss = aux_loss + l_aux
+            return output, aux_loss
         else:
-            for mod in self.layers: output = mod(output, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
-            return output
+            for mod in self.layers:
+                output, l_aux = mod(output, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
+                aux_loss = aux_loss + l_aux
+            return output, aux_loss
 
 
 
@@ -217,11 +268,8 @@ class TSTEncoderLayer(nn.Module):
         else:
             self.norm_attn = nn.LayerNorm(d_model)
 
-        # Position-wise Feed-Forward
-        self.ff = nn.Sequential(nn.Linear(d_model, d_ff, bias=bias),
-                                get_activation_fn(activation),
-                                nn.Dropout(dropout),
-                                nn.Linear(d_ff, d_model, bias=bias))
+        # Position-wise Feed-Forward replaced with MoE
+        self.ff = SwitchFeedForward(d_model, d_ff, dropout=dropout, activation=activation)
 
         # Add & Norm
         self.dropout_ffn = nn.Dropout(dropout)
@@ -255,16 +303,16 @@ class TSTEncoderLayer(nn.Module):
         if self.pre_norm:
             src = self.norm_ffn(src)
         ## Position-wise Feed-Forward
-        src2 = self.ff(src)
+        src2, aux_loss = self.ff(src)
         ## Add & Norm
         src = src + self.dropout_ffn(src2) # Add: residual connection with residual dropout
         if not self.pre_norm:
             src = self.norm_ffn(src)
 
         if self.res_attention:
-            return src, scores
+            return src, scores, aux_loss
         else:
-            return src
+            return src, aux_loss
 
 
 

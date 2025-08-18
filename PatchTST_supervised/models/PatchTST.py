@@ -81,12 +81,13 @@ class Model(nn.Module):
         if self.decomposition:
             res_init, trend_init = self.decomp_module(x)
             res_init, trend_init = res_init.permute(0,2,1), trend_init.permute(0,2,1)  # x: [Batch, Channel, Input length]
-            res = self.model_res(res_init)
-            trend = self.model_trend(trend_init)
+            res, aux1 = self.model_res(res_init)
+            trend, aux2 = self.model_trend(trend_init)
             x = res + trend
             x = x.permute(0,2,1)    # x: [Batch, Input length, Channel]
+            return x, aux1 + aux2
         else:
             x = x.permute(0,2,1)    # x: [Batch, Channel, Input length]
-            x = self.model(x)
+            x, aux = self.model(x)
             x = x.permute(0,2,1)    # x: [Batch, Input length, Channel]
-        return x
+            return x, aux
