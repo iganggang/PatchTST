@@ -44,6 +44,7 @@ parser.add_argument('--head_dropout', type=float, default=0, help='head dropout'
 # Optimization args
 parser.add_argument('--n_epochs', type=int, default=20, help='number of training epochs')
 parser.add_argument('--lr', type=float, default=1e-4, help='learning rate')
+parser.add_argument('--aux_weight', type=float, default=0.01, help='weight for auxiliary load balancing loss')
 # model id to keep track of the number of models saved
 parser.add_argument('--model_id', type=int, default=1, help='id of the saved model')
 parser.add_argument('--model_type', type=str, default='based_model', help='for multivariate model or univariate model')
@@ -91,12 +92,12 @@ def find_lr():
     dls = get_dls(args)    
     model = get_model(dls.vars, args)
     # get loss
-    loss_func = torch.nn.MSELoss(reduction='mean')
+    loss_func = nn.HuberLoss()
     # get callbacks
     cbs = [RevInCB(dls.vars)] if args.revin else []
     cbs += [PatchCB(patch_len=args.patch_len, stride=args.stride)]
     # define learner
-    learn = Learner(dls, model, loss_func, cbs=cbs)                        
+    learn = Learner(dls, model, loss_func, cbs=cbs, aux_weight=args.aux_weight)
     # fit the data to the model
     return learn.lr_finder()
 
@@ -110,7 +111,7 @@ def train_func(lr=args.lr):
     model = get_model(dls.vars, args)
 
     # get loss
-    loss_func = torch.nn.MSELoss(reduction='mean')
+    loss_func = nn.HuberLoss()
 
     # get callbacks
     cbs = [RevInCB(dls.vars)] if args.revin else []
@@ -121,11 +122,12 @@ def train_func(lr=args.lr):
         ]
 
     # define learner
-    learn = Learner(dls, model, 
-                        loss_func, 
-                        lr=lr, 
+    learn = Learner(dls, model,
+                        loss_func,
+                        lr=lr,
                         cbs=cbs,
-                        metrics=[mse]
+                        metrics=[mse],
+                        aux_weight=args.aux_weight
                         )
                         
     # fit the data to the model
@@ -141,7 +143,7 @@ def test_func():
     # get callbacks
     cbs = [RevInCB(dls.vars)] if args.revin else []
     cbs += [PatchCB(patch_len=args.patch_len, stride=args.stride)]
-    learn = Learner(dls, model,cbs=cbs)
+    learn = Learner(dls, model, cbs=cbs, aux_weight=args.aux_weight)
     out  = learn.test(dls.test, weight_path=weight_path, scores=[mse,mae])         # out: a list of [pred, targ, score_values]
     return out
 

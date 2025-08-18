@@ -45,6 +45,7 @@ parser.add_argument('--head_dropout', type=float, default=0.2, help='head dropou
 # Optimization args
 parser.add_argument('--n_epochs_finetune', type=int, default=20, help='number of finetuning epochs')
 parser.add_argument('--lr', type=float, default=1e-4, help='learning rate')
+parser.add_argument('--aux_weight', type=float, default=0.01, help='weight for auxiliary load balancing loss')
 # Pretrained model name
 parser.add_argument('--pretrained_model', type=str, default=None, help='pretrained model name')
 # model id to keep track of the number of models saved
@@ -106,17 +107,18 @@ def find_lr(head_type):
     # weight_path = args.save_path + args.pretrained_model + '.pth'
     model = transfer_weights(args.pretrained_model, model)
     # get loss
-    loss_func = torch.nn.MSELoss(reduction='mean')
+    loss_func = nn.HuberLoss()
     # get callbacks
     cbs = [RevInCB(dls.vars)] if args.revin else []
     cbs += [PatchCB(patch_len=args.patch_len, stride=args.stride)]
         
     # define learner
-    learn = Learner(dls, model, 
-                        loss_func, 
-                        lr=args.lr, 
+    learn = Learner(dls, model,
+                        loss_func,
+                        lr=args.lr,
                         cbs=cbs,
-                        )                        
+                        aux_weight=args.aux_weight,
+                        )
     # fit the data to the model
     suggested_lr = learn.lr_finder()
     print('suggested_lr', suggested_lr)
@@ -140,7 +142,7 @@ def finetune_func(lr=args.lr):
     # weight_path = args.pretrained_model + '.pth'
     model = transfer_weights(args.pretrained_model, model)
     # get loss
-    loss_func = torch.nn.MSELoss(reduction='mean')   
+    loss_func = nn.HuberLoss()
     # get callbacks
     cbs = [RevInCB(dls.vars, denorm=True)] if args.revin else []
     cbs += [
@@ -148,12 +150,13 @@ def finetune_func(lr=args.lr):
          SaveModelCB(monitor='valid_loss', fname=args.save_finetuned_model, path=args.save_path)
         ]
     # define learner
-    learn = Learner(dls, model, 
-                        loss_func, 
-                        lr=lr, 
+    learn = Learner(dls, model,
+                        loss_func,
+                        lr=lr,
                         cbs=cbs,
-                        metrics=[mse]
-                        )                            
+                        metrics=[mse],
+                        aux_weight=args.aux_weight
+                        )
     # fit the data to the model
     #learn.fit_one_cycle(n_epochs=args.n_epochs_finetune, lr_max=lr)
     learn.fine_tune(n_epochs=args.n_epochs_finetune, base_lr=lr, freeze_epochs=10)
@@ -170,7 +173,7 @@ def linear_probe_func(lr=args.lr):
     # weight_path = args.save_path + args.pretrained_model + '.pth'
     model = transfer_weights(args.pretrained_model, model)
     # get loss
-    loss_func = torch.nn.MSELoss(reduction='mean')    
+    loss_func = nn.HuberLoss()
     # get callbacks
     cbs = [RevInCB(dls.vars, denorm=True)] if args.revin else []
     cbs += [
@@ -178,12 +181,13 @@ def linear_probe_func(lr=args.lr):
          SaveModelCB(monitor='valid_loss', fname=args.save_finetuned_model, path=args.save_path)
         ]
     # define learner
-    learn = Learner(dls, model, 
-                        loss_func, 
-                        lr=lr, 
+    learn = Learner(dls, model,
+                        loss_func,
+                        lr=lr,
                         cbs=cbs,
-                        metrics=[mse]
-                        )                            
+                        metrics=[mse],
+                        aux_weight=args.aux_weight
+                        )
     # fit the data to the model
     learn.linear_probe(n_epochs=args.n_epochs_finetune, base_lr=lr)
     save_recorders(learn)
@@ -196,7 +200,7 @@ def test_func(weight_path):
     # get callbacks
     cbs = [RevInCB(dls.vars, denorm=True)] if args.revin else []
     cbs += [PatchCB(patch_len=args.patch_len, stride=args.stride)]
-    learn = Learner(dls, model,cbs=cbs)
+    learn = Learner(dls, model, cbs=cbs, aux_weight=args.aux_weight)
     out  = learn.test(dls.test, weight_path=weight_path+'.pth', scores=[mse,mae])         # out: a list of [pred, targ, score]
     print('score:', out[2])
     # save results
