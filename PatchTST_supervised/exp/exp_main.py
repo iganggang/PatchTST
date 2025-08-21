@@ -155,14 +155,17 @@ class Exp_Main(Exp_Basic):
                     with torch.cuda.amp.autocast():
                         if 'Linear' in self.args.model or 'TST' in self.args.model:
                             outputs = self.model(batch_x)
-                            aux_loss = 0.
-                            if isinstance(outputs, tuple):
-                                outputs, aux_loss = outputs
                         else:
                             if self.args.output_attention:
                                 outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                             else:
                                 outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+
+                        aux_loss = 0.
+                        if isinstance(outputs, tuple):
+                            outputs, aux_loss = outputs
+                            if isinstance(aux_loss, torch.Tensor):
+                                aux_loss = aux_loss.mean()
 
                         f_dim = -1 if self.args.features == 'MS' else 0
                         outputs = outputs[:, -self.args.pred_len:, f_dim:]
@@ -171,16 +174,18 @@ class Exp_Main(Exp_Basic):
                         train_loss.append(loss.item())
                 else:
                     if 'Linear' in self.args.model or 'TST' in self.args.model:
-                            outputs = self.model(batch_x)
-                            aux_loss = 0.
-                            if isinstance(outputs, tuple):
-                                outputs, aux_loss = outputs
+                        outputs = self.model(batch_x)
                     else:
                         if self.args.output_attention:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                         else:
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, batch_y)
-                        aux_loss = 0.
+
+                    aux_loss = 0.
+                    if isinstance(outputs, tuple):
+                        outputs, aux_loss = outputs
+                        if isinstance(aux_loss, torch.Tensor):
+                            aux_loss = aux_loss.mean()
                     # print(outputs.shape,batch_y.shape)
                     f_dim = -1 if self.args.features == 'MS' else 0
                     outputs = outputs[:, -self.args.pred_len:, f_dim:]
