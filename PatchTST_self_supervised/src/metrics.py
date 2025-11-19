@@ -19,3 +19,9 @@ def r2_score(y_true, y_pred):
 def mape(y_true, y_pred):
     from sklearn.metrics import mean_absolute_percentage_error
     return mean_absolute_percentage_error(y_true, y_pred)
+
+
+def accuracy(y_true: Tensor, y_pred: Tensor):
+    if y_pred.ndim > y_true.ndim:
+        y_pred = y_pred.argmax(dim=-1)
+    return (y_pred == y_true).float().mean()

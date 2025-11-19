@@ -1,8 +1,10 @@
 import os
+from typing import Dict, Tuple
+
 import numpy as np
 import pandas as pd
-import os
 import torch
+from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 
@@ -410,6 +412,179 @@ class Dataset_Pred(Dataset):
 
     def inverse_transform(self, data):
         return self.scaler.inverse_transform(data)
+
+
+class Dataset_UEA(Dataset):
+    """Dataset for UEA time-series classification benchmarks."""
+
+    _cache: Dict[Tuple[str, str, float, int], Dict[str, dict]] = {}
+
+    def __init__(
+        self,
+        root_path: str,
+        data_path: str,
+        split: str = "train",
+        val_ratio: float = 0.2,
+        random_state: int = 42,
+        scale: bool = False,
+    ):
+        super().__init__()
+
+        assert split in ["train", "val", "test"], "split must be 'train', 'val', or 'test'"
+
+        cache_key = (os.path.abspath(root_path), data_path, float(val_ratio), int(random_state))
+        if cache_key not in self._cache:
+            self._cache[cache_key] = self._prepare_data(
+                root_path=root_path,
+                data_path=data_path,
+                val_ratio=val_ratio,
+                random_state=random_state,
+            )
+
+        cached = self._cache[cache_key]
+        self.splits = cached["splits"]
+        self.label_mapping = cached["label_mapping"]
+        self.stats = cached["stats"]
+        self.meta = cached["meta"]
+        self.scale = scale
+
+        if split not in self.splits:
+            raise ValueError(f"Split '{split}' is not available for dataset {data_path}.")
+
+        self.x, self.y = self.splits[split]
+        if self.scale and self.x.size:
+            mean, std = self.stats["mean"], self.stats["std"]
+            self.x = (self.x - mean) / std
+
+        self.n_classes = len(self.label_mapping)
+        self.seq_len = self.x.shape[1] if self.x.size else self.meta["seq_len"]
+        self.n_vars = self.x.shape[2] if self.x.size else self.meta["n_vars"]
+
+    @staticmethod
+    def _load_split_from_npz(npz_dict, split, kind):
+        candidates = [
+            f"{split}_{kind}",
+            f"{split}{kind}",
+            f"{kind}_{split}",
+            f"{kind}{split}",
+            f"{split}_{kind.upper()}",
+            f"{split}{kind.upper()}",
+            f"{kind.upper()}_{split}",
+            f"{kind.upper()}{split}",
+        ]
+        for key in candidates:
+            if key in npz_dict:
+                return npz_dict[key]
+        return None
+
+    @classmethod
+    def _prepare_data(cls, root_path: str, data_path: str, val_ratio: float, random_state: int):
+        file_path = os.path.join(root_path, data_path)
+        if os.path.isdir(file_path):
+            npz_path = os.path.join(file_path, f"{os.path.basename(file_path)}.npz")
+            if os.path.exists(npz_path):
+                file_path = npz_path
+        if not os.path.exists(file_path):
+            alt_path = f"{file_path}.npz"
+            if os.path.exists(alt_path):
+                file_path = alt_path
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Dataset file {file_path} not found")
+
+        data = np.load(file_path, allow_pickle=True)
+
+        splits = {}
+        for split in ["train", "test", "val"]:
+            xs = cls._load_split_from_npz(data, split, "x")
+            ys = cls._load_split_from_npz(data, split, "y")
+            if xs is not None and ys is not None:
+                splits[split] = (np.array(xs), np.array(ys))
+
+        if "train" not in splits or "test" not in splits:
+            raise ValueError("Dataset must provide at least train and test splits")
+
+        train_x, train_y = splits["train"]
+        test_x, test_y = splits["test"]
+
+        if "val" in splits:
+            val_x, val_y = splits["val"]
+        elif val_ratio > 0:
+            stratify = train_y if np.unique(train_y).size > 1 else None
+            train_x, val_x, train_y, val_y = train_test_split(
+                train_x,
+                train_y,
+                test_size=val_ratio,
+                random_state=random_state,
+                stratify=stratify,
+            )
+        else:
+            val_x = np.empty((0, *train_x.shape[1:]), dtype=train_x.dtype)
+            val_y = np.empty((0,), dtype=train_y.dtype)
+
+        splits["train"] = (train_x, train_y)
+        splits["val"] = (val_x, val_y)
+        splits["test"] = (test_x, test_y)
+
+        all_labels = np.concatenate(
+            [splits[s][1].ravel() for s in ["train", "val", "test"] if splits[s][1].size]
+        )
+        unique_labels = np.unique(all_labels)
+        label_mapping = {label: idx for idx, label in enumerate(unique_labels)}
+
+        def encode_labels(y):
+            if y.size == 0:
+                return y.astype(np.int64)
+            return np.vectorize(label_mapping.get)(y).astype(np.int64)
+
+        for split in splits:
+            x, y = splits[split]
+            x = cls._ensure_3d(x)
+            y = encode_labels(y)
+            splits[split] = (x.astype(np.float32), y)
+
+        if splits["train"][0].size:
+            train_features = splits["train"][0].reshape(-1, splits["train"][0].shape[-1])
+            mean = train_features.mean(axis=0, keepdims=True)
+            std = train_features.std(axis=0, keepdims=True)
+            std[std < 1e-6] = 1.0
+        else:
+            mean = np.zeros((1, splits["train"][0].shape[-1]))
+            std = np.ones((1, splits["train"][0].shape[-1]))
+
+        mean = mean.reshape(1, 1, -1)
+        std = std.reshape(1, 1, -1)
+
+        meta = {
+            "seq_len": splits["train"][0].shape[1] if splits["train"][0].size else 0,
+            "n_vars": splits["train"][0].shape[2] if splits["train"][0].size else 0,
+        }
+
+        return {
+            "splits": splits,
+            "label_mapping": label_mapping,
+            "stats": {"mean": mean, "std": std},
+            "meta": meta,
+        }
+
+    @staticmethod
+    def _ensure_3d(x: np.ndarray) -> np.ndarray:
+        if x.ndim == 2:
+            return x[:, :, None]
+        if x.ndim != 3:
+            raise ValueError("Expected data with 3 dimensions (samples, length, variables)")
+        if x.shape[1] < x.shape[2]:
+            return np.transpose(x, (0, 2, 1))
+        return x
+
+    def __getitem__(self, index):
+        if self.x.size == 0:
+            raise IndexError("Empty dataset")
+        x = torch.from_numpy(self.x[index])
+        y = torch.tensor(self.y[index], dtype=torch.long)
+        return x, y
+
+    def __len__(self):
+        return len(self.x)
 
 
 def _torch(*dfs):
