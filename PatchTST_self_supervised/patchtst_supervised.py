@@ -1,10 +1,10 @@
 
 
-import numpy as np
-import pandas as pd
+import argparse
 import os
-import torch
-from torch import nn
+
+import numpy as np
+import torch.nn as nn
 
 from src.models.patchTST import PatchTST
 from src.learner import Learner
@@ -17,134 +17,131 @@ from src.metrics import *
 from datautils import get_dls
 
 
-import argparse
-
 parser = argparse.ArgumentParser()
 # Dataset and dataloader
-parser.add_argument('--dset', type=str, default='etth1', help='dataset name')
-parser.add_argument('--context_points', type=int, default=336, help='sequence length')
-parser.add_argument('--target_points', type=int, default=96, help='forecast horizon')
+parser.add_argument('--dset', type=str, default='HandMovementDirection', help='UEA dataset name')
+parser.add_argument('--root_path', type=str, default='./data/UEA', help='root directory of the dataset archive')
+parser.add_argument('--context_points', type=int, default=512, help='sequence length (after padding/cropping)')
 parser.add_argument('--batch_size', type=int, default=64, help='batch size')
 parser.add_argument('--num_workers', type=int, default=1, help='number of workers for DataLoader')
-parser.add_argument('--scaler', type=str, default='standard', help='scale the input data')
-parser.add_argument('--features', type=str, default='M', help='for multivariate model or univariate model')
-parser.add_argument('--use_time_features', type=int, default=0, help='whether to use time features or not')
+parser.add_argument('--val_ratio', type=float, default=0.1, help='ratio of the training split used for validation')
+parser.add_argument('--normalize', type=int, default=1, help='if true, apply per-sample z-normalization')
+parser.add_argument('--split_seed', type=int, default=42, help='random seed for the train/val split')
 # Patch
-parser.add_argument('--patch_len', type=int, default=32, help='patch length')
-parser.add_argument('--stride', type=int, default=16, help='stride between patch')
+parser.add_argument('--patch_len', type=int, default=16, help='patch length')
+parser.add_argument('--stride', type=int, default=8, help='stride between patches')
 # RevIN
-parser.add_argument('--revin', type=int, default=1, help='reversible instance normalization')
+parser.add_argument('--revin', type=int, default=0, help='reversible instance normalization (input only)')
 # Model args
 parser.add_argument('--n_layers', type=int, default=3, help='number of Transformer layers')
 parser.add_argument('--n_heads', type=int, default=16, help='number of Transformer heads')
 parser.add_argument('--d_model', type=int, default=128, help='Transformer d_model')
-parser.add_argument('--d_ff', type=int, default=256, help='Tranformer MLP dimension')
+parser.add_argument('--d_ff', type=int, default=256, help='Transformer MLP dimension')
 parser.add_argument('--dropout', type=float, default=0.2, help='Transformer dropout')
-parser.add_argument('--head_dropout', type=float, default=0, help='head dropout')
+parser.add_argument('--head_dropout', type=float, default=0.1, help='head dropout')
 # Optimization args
 parser.add_argument('--n_epochs', type=int, default=20, help='number of training epochs')
 parser.add_argument('--lr', type=float, default=1e-4, help='learning rate')
 parser.add_argument('--aux_weight', type=float, default=0.01, help='weight for auxiliary load balancing loss')
 # model id to keep track of the number of models saved
 parser.add_argument('--model_id', type=int, default=1, help='id of the saved model')
-parser.add_argument('--model_type', type=str, default='based_model', help='for multivariate model or univariate model')
+parser.add_argument('--model_type', type=str, default='classification', help='sub-folder used for checkpoints')
 # training
 parser.add_argument('--is_train', type=int, default=1, help='training the model')
 
 
 args = parser.parse_args()
 print('args:', args)
-args.save_model_name = 'patchtst_supervised'+'_cw'+str(args.context_points)+'_tw'+str(args.target_points) + '_patch'+str(args.patch_len) + '_stride'+str(args.stride)+'_epochs'+str(args.n_epochs) + '_model' + str(args.model_id)
-args.save_path = 'saved_models/' + args.dset + '/patchtst_supervised/' + args.model_type + '/'
-if not os.path.exists(args.save_path): os.makedirs(args.save_path)
+args.save_model_name = (
+    'patchtst_classification'
+    + f"_{args.dset}_sl{args.context_points}_patch{args.patch_len}_stride{args.stride}_epochs{args.n_epochs}_model{args.model_id}"
+)
+args.save_path = f"saved_models/{args.dset}/patchtst_classification/{args.model_type}/"
+os.makedirs(args.save_path, exist_ok=True)
 
 
-def get_model(c_in, args):
+def get_model(c_in, n_classes, args):
     """
     c_in: number of input variables
     """
-    # get number of patches
-    num_patch = (max(args.context_points, args.patch_len)-args.patch_len) // args.stride + 1    
+    num_patch = (max(args.context_points, args.patch_len) - args.patch_len) // args.stride + 1
     print('number of patches:', num_patch)
-    
-    # get model
-    model = PatchTST(c_in=c_in,
-                target_dim=args.target_points,
-                patch_len=args.patch_len,
-                stride=args.stride,
-                num_patch=num_patch,                
-                n_layers=args.n_layers,
-                n_heads=args.n_heads,
-                d_model=args.d_model,
-                shared_embedding=True,
-                d_ff=args.d_ff,                        
-                dropout=args.dropout,
-                head_dropout=args.head_dropout,
-                act='relu',
-                head_type='prediction',
-                res_attention=False
-                )    
+
+    model = PatchTST(
+        c_in=c_in,
+        target_dim=n_classes,
+        patch_len=args.patch_len,
+        stride=args.stride,
+        num_patch=num_patch,
+        n_layers=args.n_layers,
+        n_heads=args.n_heads,
+        d_model=args.d_model,
+        shared_embedding=True,
+        d_ff=args.d_ff,
+        dropout=args.dropout,
+        head_dropout=args.head_dropout,
+        act='relu',
+        head_type='classification',
+        res_attention=False,
+    )
     return model
 
 
+def _default_cbs(dls):
+    cbs = []
+    if args.revin:
+        cbs.append(RevInCB(dls.vars, denorm=False))
+    cbs.append(PatchCB(patch_len=args.patch_len, stride=args.stride))
+    return cbs
+
+
 def find_lr():
-    # get dataloader
-    dls = get_dls(args)    
-    model = get_model(dls.vars, args)
-    # get loss
-    loss_func = nn.HuberLoss()
-    # get callbacks
-    cbs = [RevInCB(dls.vars)] if args.revin else []
-    cbs += [PatchCB(patch_len=args.patch_len, stride=args.stride)]
-    # define learner
-    learn = Learner(dls, model, loss_func, cbs=cbs, aux_weight=args.aux_weight)
-    # fit the data to the model
+    dls = get_dls(args)
+    model = get_model(dls.vars, dls.c, args)
+    loss_func = nn.CrossEntropyLoss()
+    learn = Learner(dls, model, loss_func, cbs=_default_cbs(dls), aux_weight=args.aux_weight)
     return learn.lr_finder()
 
 
 def train_func(lr=args.lr):
-    # get dataloader
     dls = get_dls(args)
     print('in out', dls.vars, dls.c, dls.len)
-    
-    # get model
-    model = get_model(dls.vars, args)
 
-    # get loss
-    loss_func = nn.HuberLoss()
+    model = get_model(dls.vars, dls.c, args)
 
-    # get callbacks
-    cbs = [RevInCB(dls.vars)] if args.revin else []
-    cbs += [
-         PatchCB(patch_len=args.patch_len, stride=args.stride),
-         SaveModelCB(monitor='valid_loss', fname=args.save_model_name, 
-                     path=args.save_path )
-        ]
+    loss_func = nn.CrossEntropyLoss()
 
-    # define learner
-    learn = Learner(dls, model,
-                        loss_func,
-                        lr=lr,
-                        cbs=cbs,
-                        metrics=[mse],
-                        aux_weight=args.aux_weight
-                        )
-                        
-    # fit the data to the model
+    cbs = _default_cbs(dls)
+    monitor_metric = 'valid_accuracy' if dls.valid else 'train_loss'
+    comp_fn = np.less if monitor_metric == 'train_loss' else np.greater
+    cbs.append(
+        SaveModelCB(
+            monitor=monitor_metric,
+            fname=args.save_model_name,
+            path=args.save_path,
+            comp=comp_fn,
+        )
+    )
+
+    learn = Learner(
+        dls,
+        model,
+        loss_func,
+        lr=lr,
+        cbs=cbs,
+        metrics=[accuracy],
+        aux_weight=args.aux_weight,
+    )
+
     learn.fit_one_cycle(n_epochs=args.n_epochs, lr_max=lr, pct_start=0.2)
 
 
 def test_func():
     weight_path = args.save_path + args.save_model_name + '.pth'
-    # get dataloader
     dls = get_dls(args)
-    model = get_model(dls.vars, args)
-    #model = torch.load(weight_path)
-    # get callbacks
-    cbs = [RevInCB(dls.vars)] if args.revin else []
-    cbs += [PatchCB(patch_len=args.patch_len, stride=args.stride)]
-    learn = Learner(dls, model, cbs=cbs, aux_weight=args.aux_weight)
-    out  = learn.test(dls.test, weight_path=weight_path, scores=[mse,mae])         # out: a list of [pred, targ, score_values]
+    model = get_model(dls.vars, dls.c, args)
+    learn = Learner(dls, model, cbs=_default_cbs(dls), aux_weight=args.aux_weight)
+    out = learn.test(dls.test, weight_path=weight_path, scores=[accuracy])
     return out
 
 

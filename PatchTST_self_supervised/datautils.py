@@ -1,196 +1,56 @@
-
-
-import numpy as np
-import pandas as pd
-import torch
-from torch import nn
-import sys
-
 from src.data.datamodule import DataLoaders
-from src.data.pred_dataset import *
+from src.data.uea_dataset import Dataset_UEA
 
-DSETS = ['ettm1', 'ettm2', 'etth1', 'etth2', 'electricity',
-         'traffic', 'illness', 'weather', 'exchange'
-        ]
+
+UEA_DATASETS = [
+    "ArticularyWordRecognition",
+    "BasicMotions",
+    "Cricket",
+    "EthanolConcentration",
+    "ERing",
+    "HandMovementDirection",
+    "Handwriting",
+    "Heartbeat",
+    "Libras",
+    "MotorImagery",
+    "NATOPS",
+    "PenDigits",
+    "PhonemeSpectra",
+    "RacketSports",
+    "SelfRegulationSCP1",
+    "SelfRegulationSCP2",
+    "SpokenArabicDigits",
+    "StandWalkJump",
+]
+
 
 def get_dls(params):
-    
-    assert params.dset in DSETS, f"Unrecognized dset (`{params.dset}`). Options include: {DSETS}"
-    if not hasattr(params,'use_time_features'): params.use_time_features = False
+    if hasattr(params, "dset") and UEA_DATASETS and params.dset not in UEA_DATASETS:
+        print(f"Warning: dataset {params.dset} not in predefined UEA list. Proceeding regardless.")
 
-    if params.dset == 'ettm1':
-        root_path = '/data/datasets/public/ETDataset/ETT-small/'
-        size = [params.context_points, 0, params.target_points]
-        dls = DataLoaders(
-                datasetCls=Dataset_ETT_minute,
-                dataset_kwargs={
-                'root_path': root_path,
-                'data_path': 'ETTm1.csv',
-                'features': params.features,
-                'scale': True,
-                'size': size,
-                'use_time_features': params.use_time_features
-                },
-                batch_size=params.batch_size,
-                workers=params.num_workers,
-                )
+    dataset_kwargs = {
+        "root_path": getattr(params, "root_path", "./data/UEA"),
+        "data_path": params.dset,
+        "seq_len": getattr(params, "context_points", None),
+        "normalize": bool(getattr(params, "normalize", True)),
+        "val_ratio": getattr(params, "val_ratio", 0.1),
+        "random_seed": getattr(params, "split_seed", 42),
+    }
 
+    dls = DataLoaders(
+        datasetCls=Dataset_UEA,
+        dataset_kwargs=dataset_kwargs,
+        batch_size=params.batch_size,
+        workers=params.num_workers,
+        shuffle_train=True,
+        shuffle_val=False,
+    )
 
-    elif params.dset == 'ettm2':
-        root_path = '/data/datasets/public/ETDataset/ETT-small/'
-        size = [params.context_points, 0, params.target_points]
-        dls = DataLoaders(
-                datasetCls=Dataset_ETT_minute,
-                dataset_kwargs={
-                'root_path': root_path,
-                'data_path': 'ETTm2.csv',
-                'features': params.features,
-                'scale': True,
-                'size': size,
-                'use_time_features': params.use_time_features
-                },
-                batch_size=params.batch_size,
-                workers=params.num_workers,
-                )
+    if dls.train is None:
+        raise RuntimeError("Training dataloader could not be created. Please check dataset path.")
 
-    elif params.dset == 'etth1':
-        root_path = '/data/datasets/public/ETDataset/ETT-small/'
-        size = [params.context_points, 0, params.target_points]
-        dls = DataLoaders(
-                datasetCls=Dataset_ETT_hour,
-                dataset_kwargs={
-                'root_path': root_path,
-                'data_path': 'ETTh1.csv',
-                'features': params.features,
-                'scale': True,
-                'size': size,
-                'use_time_features': params.use_time_features
-                },
-                batch_size=params.batch_size,
-                workers=params.num_workers,
-                )
-
-
-    elif params.dset == 'etth2':
-        root_path = '/data/datasets/public/ETDataset/ETT-small/'
-        size = [params.context_points, 0, params.target_points]
-        dls = DataLoaders(
-                datasetCls=Dataset_ETT_hour,
-                dataset_kwargs={
-                'root_path': root_path,
-                'data_path': 'ETTh2.csv',
-                'features': params.features,
-                'scale': True,
-                'size': size,
-                'use_time_features': params.use_time_features
-                },
-                batch_size=params.batch_size,
-                workers=params.num_workers,
-                )
-    
-
-    elif params.dset == 'electricity':
-        root_path = '/data/datasets/public/electricity/'
-        size = [params.context_points, 0, params.target_points]
-        dls = DataLoaders(
-                datasetCls=Dataset_Custom,
-                dataset_kwargs={
-                'root_path': root_path,
-                'data_path': 'electricity.csv',
-                'features': params.features,
-                'scale': True,
-                'size': size,
-                'use_time_features': params.use_time_features
-                },
-                batch_size=params.batch_size,
-                workers=params.num_workers,
-                )
-
-    elif params.dset == 'traffic':
-        root_path = '/data/datasets/public/traffic/'
-        size = [params.context_points, 0, params.target_points]
-        dls = DataLoaders(
-                datasetCls=Dataset_Custom,
-                dataset_kwargs={
-                'root_path': root_path,
-                'data_path': 'traffic.csv',
-                'features': params.features,
-                'scale': True,
-                'size': size,
-                'use_time_features': params.use_time_features
-                },
-                batch_size=params.batch_size,
-                workers=params.num_workers,
-                )
-    
-    elif params.dset == 'weather':
-        root_path = '/data/datasets/public/weather/'
-        size = [params.context_points, 0, params.target_points]
-        dls = DataLoaders(
-                datasetCls=Dataset_Custom,
-                dataset_kwargs={
-                'root_path': root_path,
-                'data_path': 'weather.csv',
-                'features': params.features,
-                'scale': True,
-                'size': size,
-                'use_time_features': params.use_time_features
-                },
-                batch_size=params.batch_size,
-                workers=params.num_workers,
-                )
-
-    elif params.dset == 'illness':
-        root_path = '/data/datasets/public/illness/'
-        size = [params.context_points, 0, params.target_points]
-        dls = DataLoaders(
-                datasetCls=Dataset_Custom,
-                dataset_kwargs={
-                'root_path': root_path,
-                'data_path': 'national_illness.csv',
-                'features': params.features,
-                'scale': True,
-                'size': size,
-                'use_time_features': params.use_time_features
-                },
-                batch_size=params.batch_size,
-                workers=params.num_workers,
-                )
-
-    elif params.dset == 'exchange':
-        root_path = '/data/datasets/public/exchange_rate/'
-        size = [params.context_points, 0, params.target_points]
-        dls = DataLoaders(
-                datasetCls=Dataset_Custom,
-                dataset_kwargs={
-                'root_path': root_path,
-                'data_path': 'exchange_rate.csv',
-                'features': params.features,
-                'scale': True,
-                'size': size,
-                'use_time_features': params.use_time_features
-                },
-                batch_size=params.batch_size,
-                workers=params.num_workers,
-                )
-    # dataset is assume to have dimension len x nvars
-    dls.vars, dls.len = dls.train.dataset[0][0].shape[1], params.context_points
-    dls.c = dls.train.dataset[0][1].shape[0]
+    train_dataset = dls.train.dataset
+    dls.vars = train_dataset.n_vars
+    dls.c = train_dataset.n_classes
+    dls.len = train_dataset.seq_len
     return dls
-
-
-
-if __name__ == "__main__":
-    class Params:
-        dset= 'etth2'
-        context_points= 384
-        target_points= 96
-        batch_size= 64
-        num_workers= 8
-        with_ray= False
-        features='M'
-    params = Params 
-    dls = get_dls(params)
-    for i, batch in enumerate(dls.valid):
-        print(i, len(batch), batch[0].shape, batch[1].shape)
-    breakpoint()
