@@ -6,9 +6,9 @@ from utils.metrics import metric
 
 import numpy as np
 import torch
-import torch.nn as nn
 from torch import optim
-from torch.optim import lr_scheduler 
+from torch.optim import lr_scheduler
+import torch.nn as nn
 
 import os
 import time
@@ -16,6 +16,8 @@ import time
 import warnings
 import matplotlib.pyplot as plt
 import numpy as np
+
+from utils.losses import NoiseAdaptiveHybridHuber
 
 warnings.filterwarnings('ignore')
 
@@ -49,7 +51,7 @@ class Exp_Main(Exp_Basic):
         return model_optim
 
     def _select_criterion(self):
-        criterion = nn.HuberLoss()
+        criterion = NoiseAdaptiveHybridHuber(delta=self.args.vah_delta, gamma=self.args.vah_gamma)
         return criterion
 
     def vali(self, vali_data, vali_loader, criterion):
@@ -98,7 +100,7 @@ class Exp_Main(Exp_Basic):
                 pred = outputs.detach().cpu()
                 true = batch_y.detach().cpu()
 
-                loss = criterion(pred, true)
+                loss = criterion(pred, true, x_for_volatility=true)
 
                 total_loss.append(loss)
         total_loss = np.average(total_loss)
@@ -167,7 +169,7 @@ class Exp_Main(Exp_Basic):
                         f_dim = -1 if self.args.features == 'MS' else 0
                         outputs = outputs[:, -self.args.pred_len:, f_dim:]
                         batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-                        loss = criterion(outputs, batch_y) + self.aux_weight * aux_loss
+                        loss = criterion(outputs, batch_y, x_for_volatility=batch_y) + self.aux_weight * aux_loss
                         train_loss.append(loss.item())
                 else:
                     if 'Linear' in self.args.model or 'TST' in self.args.model:
@@ -185,7 +187,7 @@ class Exp_Main(Exp_Basic):
                     f_dim = -1 if self.args.features == 'MS' else 0
                     outputs = outputs[:, -self.args.pred_len:, f_dim:]
                     batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-                    loss = criterion(outputs, batch_y) + self.aux_weight * aux_loss
+                    loss = criterion(outputs, batch_y, x_for_volatility=batch_y) + self.aux_weight * aux_loss
                     train_loss.append(loss.item())
 
                 if (i + 1) % 100 == 0:
