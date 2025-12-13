@@ -43,6 +43,8 @@ if __name__ == '__main__':
     parser.add_argument('--patch_len', type=int, default=16, help='patch length')
     parser.add_argument('--stride', type=int, default=8, help='stride')
     parser.add_argument('--padding_patch', default='end', help='None: None; end: padding on the end')
+    parser.add_argument('--moe_mode', type=str, default='both', choices=['none', 'value', 'ffn', 'both'],
+                        help='Mixture-of-Experts usage: none, value encoder only, FFN only, or both')
     parser.add_argument('--revin', type=int, default=1, help='RevIN; True 1 False 0')
     parser.add_argument('--affine', type=int, default=0, help='RevIN-affine; True 1 False 0')
     parser.add_argument('--subtract_last', type=int, default=0, help='0: subtract mean; 1: subtract last')
@@ -117,7 +119,7 @@ if __name__ == '__main__':
     if args.is_training:
         for ii in range(args.itr):
             # setting record of experiments
-            setting = '{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_dt{}_{}_{}'.format(
+            setting = '{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_moe{}_dt{}_{}_{}'.format(
                 args.model_id,
                 args.model,
                 args.data,
@@ -132,6 +134,7 @@ if __name__ == '__main__':
                 args.d_ff,
                 args.factor,
                 args.embed,
+                args.moe_mode,
                 args.distil,
                 args.des,ii)
 
@@ -149,22 +152,23 @@ if __name__ == '__main__':
             torch.cuda.empty_cache()
     else:
         ii = 0
-        setting = '{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_dt{}_{}_{}'.format(args.model_id,
-                                                                                                    args.model,
-                                                                                                    args.data,
-                                                                                                    args.features,
-                                                                                                    args.seq_len,
-                                                                                                    args.label_len,
-                                                                                                    args.pred_len,
-                                                                                                    args.d_model,
-                                                                                                    args.n_heads,
-                                                                                                    args.e_layers,
-                                                                                                    args.d_layers,
-                                                                                                    args.d_ff,
-                                                                                                    args.factor,
-                                                                                                    args.embed,
-                                                                                                    args.distil,
-                                                                                                    args.des, ii)
+        setting = '{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_moe{}_dt{}_{}_{}'.format(args.model_id,
+                                                                                                           args.model,
+                                                                                                           args.data,
+                                                                                                           args.features,
+                                                                                                           args.seq_len,
+                                                                                                           args.label_len,
+                                                                                                           args.pred_len,
+                                                                                                           args.d_model,
+                                                                                                           args.n_heads,
+                                                                                                           args.e_layers,
+                                                                                                           args.d_layers,
+                                                                                                           args.d_ff,
+                                                                                                           args.factor,
+                                                                                                           args.embed,
+                                                                                                           args.moe_mode,
+                                                                                                           args.distil,
+                                                                                                           args.des, ii)
 
         exp = Exp(args)  # set experiments
         print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
