@@ -20,7 +20,8 @@ class PatchTST_backbone(nn.Module):
                  padding_var:Optional[int]=None, attn_mask:Optional[Tensor]=None, res_attention:bool=True, pre_norm:bool=False, store_attn:bool=False,
                  pe:str='zeros', learn_pe:bool=True, fc_dropout:float=0., head_dropout = 0, padding_patch = None,
                  pretrain_head:bool=False, head_type = 'flatten', individual = False, revin = True, affine = True, subtract_last = False,
-                 verbose:bool=False, **kwargs):
+                 verbose:bool=False, use_value_moe: bool = True, use_ffn_moe: bool = True,
+                 value_moe_experts: int = 4, ffn_moe_experts: int = 4, **kwargs):
         
         super().__init__()
         
@@ -37,12 +38,13 @@ class PatchTST_backbone(nn.Module):
             self.padding_patch_layer = nn.ReplicationPad1d((0, stride)) 
             patch_num += 1
         
-        # Backbone 
+        # Backbone
         self.backbone = TSTiEncoder(c_in, patch_num=patch_num, patch_len=patch_len, max_seq_len=max_seq_len,
                                 n_layers=n_layers, d_model=d_model, n_heads=n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff,
                                 attn_dropout=attn_dropout, dropout=dropout, act=act, key_padding_mask=key_padding_mask, padding_var=padding_var,
                                 attn_mask=attn_mask, res_attention=res_attention, pre_norm=pre_norm, store_attn=store_attn,
-                                pe=pe, learn_pe=learn_pe, verbose=verbose, **kwargs)
+                                pe=pe, learn_pe=learn_pe, verbose=verbose, use_value_moe=use_value_moe, use_ffn_moe=use_ffn_moe,
+                                value_moe_experts=value_moe_experts, ffn_moe_experts=ffn_moe_experts, **kwargs)
 
         # Head
         self.head_nf = d_model * patch_num
@@ -144,6 +146,26 @@ class SwitchLinear(nn.Module):
         return out, aux_loss
 
 
+class LinearValueEncoder(nn.Module):
+    """Standard linear projection used when value-side MoE is disabled."""
+
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features)
+
+    def forward(self, x):
+        out = self.linear(x)
+        aux_loss = torch.zeros((), device=x.device, dtype=x.dtype)
+        return out, aux_loss
+
+
+def build_value_encoder(use_value_moe: bool, in_features: int, out_features: int, n_experts: int = 4):
+    """Factory that builds either SwitchLinear or a plain Linear layer."""
+    if use_value_moe:
+        return SwitchLinear(in_features, out_features, n_experts=n_experts)
+    return LinearValueEncoder(in_features, out_features)
+
+
 class SwitchFeedForward(nn.Module):
     """MoE feed-forward layer for Switch Transformer."""
     def __init__(self, d_model, d_ff, n_experts: int = 4, dropout: float = 0., activation: str = "gelu"):
@@ -171,22 +193,49 @@ class SwitchFeedForward(nn.Module):
         return out, aux_loss
 
 
+class StandardFeedForward(nn.Module):
+    """Standard position-wise feed-forward network used when MoE is disabled."""
+
+    def __init__(self, d_model, d_ff, dropout: float = 0., activation: str = "gelu"):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(d_model, d_ff),
+            get_activation_fn(activation),
+            nn.Dropout(dropout),
+            nn.Linear(d_ff, d_model),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x):
+        out = self.net(x)
+        aux_loss = torch.zeros((), device=x.device, dtype=x.dtype)
+        return out, aux_loss
+
+
+def build_ffn_layer(use_ffn_moe: bool, d_model: int, d_ff: int, n_experts: int = 4, dropout: float = 0., activation: str = "gelu"):
+    """Factory that builds either SwitchFeedForward or a standard FFN."""
+    if use_ffn_moe:
+        return SwitchFeedForward(d_model, d_ff, n_experts=n_experts, dropout=dropout, activation=activation)
+    return StandardFeedForward(d_model, d_ff, dropout=dropout, activation=activation)
+
+
 class TSTiEncoder(nn.Module):  #i means channel-independent
     def __init__(self, c_in, patch_num, patch_len, max_seq_len=1024,
                  n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None,
                  d_ff=256, norm='BatchNorm', attn_dropout=0., dropout=0., act="gelu", store_attn=False,
                  key_padding_mask='auto', padding_var=None, attn_mask=None, res_attention=True, pre_norm=False,
-                 pe='zeros', learn_pe=True, verbose=False, **kwargs):
+                 pe='zeros', learn_pe=True, verbose=False, use_value_moe: bool = True, use_ffn_moe: bool = True,
+                 value_moe_experts: int = 4, ffn_moe_experts: int = 4, **kwargs):
         
         
         super().__init__()
         
         self.patch_num = patch_num
         self.patch_len = patch_len
-        
+
         # Input encoding
         q_len = patch_num
-        self.W_P = SwitchLinear(patch_len, d_model)
+        self.W_P = build_value_encoder(use_value_moe, patch_len, d_model, n_experts=value_moe_experts)
         self.seq_len = q_len
 
         # Positional encoding
@@ -197,7 +246,8 @@ class TSTiEncoder(nn.Module):  #i means channel-independent
 
         # Encoder
         self.encoder = TSTEncoder(q_len, d_model, n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff, norm=norm, attn_dropout=attn_dropout, dropout=dropout,
-                                   pre_norm=pre_norm, activation=act, res_attention=res_attention, n_layers=n_layers, store_attn=store_attn)
+                                   pre_norm=pre_norm, activation=act, res_attention=res_attention, n_layers=n_layers,
+                                   store_attn=store_attn, use_ffn_moe=use_ffn_moe, ffn_moe_experts=ffn_moe_experts)
 
         
     def forward(self, x) -> Tensor:                                              # x: [bs x nvars x patch_len x patch_num]
@@ -221,15 +271,17 @@ class TSTiEncoder(nn.Module):  #i means channel-independent
     
 # Cell
 class TSTEncoder(nn.Module):
-    def __init__(self, q_len, d_model, n_heads, d_k=None, d_v=None, d_ff=None, 
+    def __init__(self, q_len, d_model, n_heads, d_k=None, d_v=None, d_ff=None,
                         norm='BatchNorm', attn_dropout=0., dropout=0., activation='gelu',
-                        res_attention=False, n_layers=1, pre_norm=False, store_attn=False):
+                        res_attention=False, n_layers=1, pre_norm=False, store_attn=False,
+                        use_ffn_moe: bool = True, ffn_moe_experts: int = 4):
         super().__init__()
 
         self.layers = nn.ModuleList([TSTEncoderLayer(q_len, d_model, n_heads=n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff, norm=norm,
                                                       attn_dropout=attn_dropout, dropout=dropout,
                                                       activation=activation, res_attention=res_attention,
-                                                      pre_norm=pre_norm, store_attn=store_attn) for i in range(n_layers)])
+                                                      pre_norm=pre_norm, store_attn=store_attn,
+                                                      use_ffn_moe=use_ffn_moe, ffn_moe_experts=ffn_moe_experts) for i in range(n_layers)])
         self.res_attention = res_attention
 
     def forward(self, src:Tensor, key_padding_mask:Optional[Tensor]=None, attn_mask:Optional[Tensor]=None):
@@ -251,7 +303,8 @@ class TSTEncoder(nn.Module):
 
 class TSTEncoderLayer(nn.Module):
     def __init__(self, q_len, d_model, n_heads, d_k=None, d_v=None, d_ff=256, store_attn=False,
-                 norm='BatchNorm', attn_dropout=0, dropout=0., bias=True, activation="gelu", res_attention=False, pre_norm=False):
+                 norm='BatchNorm', attn_dropout=0, dropout=0., bias=True, activation="gelu", res_attention=False, pre_norm=False,
+                 use_ffn_moe: bool = True, ffn_moe_experts: int = 4):
         super().__init__()
         assert not d_model%n_heads, f"d_model ({d_model}) must be divisible by n_heads ({n_heads})"
         d_k = d_model // n_heads if d_k is None else d_k
@@ -269,7 +322,7 @@ class TSTEncoderLayer(nn.Module):
             self.norm_attn = nn.LayerNorm(d_model)
 
         # Position-wise Feed-Forward replaced with MoE
-        self.ff = SwitchFeedForward(d_model, d_ff, dropout=dropout, activation=activation)
+        self.ff = build_ffn_layer(use_ffn_moe, d_model, d_ff, n_experts=ffn_moe_experts, dropout=dropout, activation=activation)
 
         # Add & Norm
         self.dropout_ffn = nn.Dropout(dropout)
