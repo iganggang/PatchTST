@@ -62,6 +62,10 @@ if __name__ == '__main__':
     parser.add_argument('--d_ff', type=int, default=2048, help='dimension of fcn')
     parser.add_argument('--moving_avg', type=int, default=25, help='window size of moving average')
     parser.add_argument('--factor', type=int, default=1, help='attn factor')
+    parser.add_argument('--attn_gate_mode', type=str, default='none',
+                        choices=['none','g_q','g_k','g_v','g_sdpa_out','g_concat','g_wo_out','g_residual'],
+                        help='Gate-Attention ablation mode')
+    parser.add_argument('--attn_gate_init', type=float, default=2.0, help='Gate bias init to keep gates open at start')
     parser.add_argument('--distil', action='store_false',
                         help='whether to use distilling in encoder, using this argument means not using distilling',
                         default=True)

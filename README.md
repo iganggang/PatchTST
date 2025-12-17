@@ -64,6 +64,23 @@ sh ./scripts/PatchTST/weather.sh
 
 You can adjust the hyperparameters based on your needs (e.g. different patch length, different look-back windows and prediction lengths.). We also provide codes for the baseline models.
 
+#### Gate-Attention ablation
+Add Gate-Attention by passing the new flags to `run_longExp.py` (defaults keep the original attention):
+
+```
+# Baseline
+python -u run_longExp.py --is_training 1 --model_id ETTm1_patch --model PatchTST --data ETTm1 --root_path ./data/ETT/ --data_path ETTm1.csv \
+  --features M --seq_len 336 --label_len 168 --pred_len 96 --enc_in 7 --dec_in 7 --c_out 7 --attn_gate_mode none
+
+# Gate on concatenated heads (G1)
+python -u run_longExp.py --is_training 1 --model_id ETTm1_patch --model PatchTST --data ETTm1 --root_path ./data/ETT/ --data_path ETTm1.csv \
+  --features M --seq_len 336 --label_len 168 --pred_len 96 --enc_in 7 --dec_in 7 --c_out 7 --attn_gate_mode g_concat --attn_gate_init 2.0
+
+# Gate on the residual update
+python -u run_longExp.py --is_training 1 --model_id ETTm1_patch --model PatchTST --data ETTm1 --root_path ./data/ETT/ --data_path ETTm1.csv \
+  --features M --seq_len 336 --label_len 168 --pred_len 96 --enc_in 7 --dec_in 7 --c_out 7 --attn_gate_mode g_residual
+```
+
 ### Self-supervised Learning
 
 1. Follow the first 2 steps above
