@@ -14,13 +14,13 @@ from layers.RevIN import RevIN
 
 # Cell
 class PatchTST_backbone(nn.Module):
-    def __init__(self, c_in:int, context_window:int, target_window:int, patch_len:int, stride:int, max_seq_len:Optional[int]=1024, 
+    def __init__(self, c_in:int, context_window:int, target_window:int, patch_len:int, stride:int, max_seq_len:Optional[int]=1024,
                  n_layers:int=3, d_model=128, n_heads=16, d_k:Optional[int]=None, d_v:Optional[int]=None,
                  d_ff:int=256, norm:str='BatchNorm', attn_dropout:float=0., dropout:float=0., act:str="gelu", key_padding_mask:bool='auto',
                  padding_var:Optional[int]=None, attn_mask:Optional[Tensor]=None, res_attention:bool=True, pre_norm:bool=False, store_attn:bool=False,
                  pe:str='zeros', learn_pe:bool=True, fc_dropout:float=0., head_dropout = 0, padding_patch = None,
                  pretrain_head:bool=False, head_type = 'flatten', individual = False, revin = True, affine = True, subtract_last = False,
-                 verbose:bool=False, **kwargs):
+                 verbose:bool=False, attn_gate_mode:str='none', attn_gate_init:float=2.0, **kwargs):
         
         super().__init__()
         
@@ -42,7 +42,7 @@ class PatchTST_backbone(nn.Module):
                                 n_layers=n_layers, d_model=d_model, n_heads=n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff,
                                 attn_dropout=attn_dropout, dropout=dropout, act=act, key_padding_mask=key_padding_mask, padding_var=padding_var,
                                 attn_mask=attn_mask, res_attention=res_attention, pre_norm=pre_norm, store_attn=store_attn,
-                                pe=pe, learn_pe=learn_pe, verbose=verbose, **kwargs)
+                                pe=pe, learn_pe=learn_pe, verbose=verbose, attn_gate_mode=attn_gate_mode, attn_gate_init=attn_gate_init, **kwargs)
 
         # Head
         self.head_nf = d_model * patch_num
@@ -144,7 +144,7 @@ class TSTiEncoder(nn.Module):  #i means channel-independent
                  n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None,
                  d_ff=256, norm='BatchNorm', attn_dropout=0., dropout=0., act="gelu", store_attn=False,
                  key_padding_mask='auto', padding_var=None, attn_mask=None, res_attention=True, pre_norm=False,
-                 pe='zeros', learn_pe=True, verbose=False, **kwargs):
+                 pe='zeros', learn_pe=True, verbose=False, attn_gate_mode:str='none', attn_gate_init:float=2.0, **kwargs):
         
         
         super().__init__()
@@ -166,7 +166,7 @@ class TSTiEncoder(nn.Module):  #i means channel-independent
         # Encoder
         self.encoder = TSTEncoder(q_len, d_model, n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff, norm=norm, attn_dropout=attn_dropout, dropout=dropout,
                                    pre_norm=pre_norm, activation=act, res_attention=res_attention, n_layers=n_layers,
-                                   store_attn=store_attn)
+                                   store_attn=store_attn, attn_gate_mode=attn_gate_mode, attn_gate_init=attn_gate_init)
 
         
     def forward(self, x) -> Tensor:                                              # x: [bs x nvars x patch_len x patch_num]
@@ -192,13 +192,15 @@ class TSTiEncoder(nn.Module):  #i means channel-independent
 class TSTEncoder(nn.Module):
     def __init__(self, q_len, d_model, n_heads, d_k=None, d_v=None, d_ff=None,
                         norm='BatchNorm', attn_dropout=0., dropout=0., activation='gelu',
-                        res_attention=False, n_layers=1, pre_norm=False, store_attn=False):
+                        res_attention=False, n_layers=1, pre_norm=False, store_attn=False,
+                        attn_gate_mode:str='none', attn_gate_init:float=2.0):
         super().__init__()
 
         self.layers = nn.ModuleList([TSTEncoderLayer(q_len, d_model, n_heads=n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff, norm=norm,
                                                       attn_dropout=attn_dropout, dropout=dropout,
                                                       activation=activation, res_attention=res_attention,
-                                                      pre_norm=pre_norm, store_attn=store_attn) for i in range(n_layers)])
+                                                      pre_norm=pre_norm, store_attn=store_attn,
+                                                      attn_gate_mode=attn_gate_mode, attn_gate_init=attn_gate_init) for i in range(n_layers)])
         self.res_attention = res_attention
 
     def forward(self, src:Tensor, key_padding_mask:Optional[Tensor]=None, attn_mask:Optional[Tensor]=None):
@@ -217,7 +219,8 @@ class TSTEncoder(nn.Module):
 
 class TSTEncoderLayer(nn.Module):
     def __init__(self, q_len, d_model, n_heads, d_k=None, d_v=None, d_ff=256, store_attn=False,
-                 norm='BatchNorm', attn_dropout=0, dropout=0., bias=True, activation="gelu", res_attention=False, pre_norm=False):
+                 norm='BatchNorm', attn_dropout=0, dropout=0., bias=True, activation="gelu", res_attention=False, pre_norm=False,
+                 attn_gate_mode:str='none', attn_gate_init:float=2.0):
         super().__init__()
         assert not d_model%n_heads, f"d_model ({d_model}) must be divisible by n_heads ({n_heads})"
         d_k = d_model // n_heads if d_k is None else d_k
@@ -225,7 +228,8 @@ class TSTEncoderLayer(nn.Module):
 
         # Multi-Head attention
         self.res_attention = res_attention
-        self.self_attn = _MultiheadAttention(d_model, n_heads, d_k, d_v, attn_dropout=attn_dropout, proj_dropout=dropout, res_attention=res_attention)
+        self.self_attn = _MultiheadAttention(d_model, n_heads, d_k, d_v, attn_dropout=attn_dropout, proj_dropout=dropout,
+                                             res_attention=res_attention, attn_gate_mode=attn_gate_mode, attn_gate_init=attn_gate_init)
 
         # Add & Norm
         self.dropout_attn = nn.Dropout(dropout)
@@ -246,6 +250,7 @@ class TSTEncoderLayer(nn.Module):
 
         self.pre_norm = pre_norm
         self.store_attn = store_attn
+        self.attn_gate_mode = attn_gate_mode
 
 
     def forward(self, src:Tensor, prev:Optional[Tensor]=None, key_padding_mask:Optional[Tensor]=None, attn_mask:Optional[Tensor]=None) -> Tensor:
@@ -255,13 +260,16 @@ class TSTEncoderLayer(nn.Module):
             src = self.norm_attn(src)
         ## Multi-Head attention
         if self.res_attention:
-            src2, attn, scores = self.self_attn(src, src, src, prev, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
+            src2, attn, scores, gate_token = self.self_attn(src, src, src, prev, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
         else:
-            src2, attn = self.self_attn(src, src, src, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
+            src2, attn, gate_token = self.self_attn(src, src, src, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
         if self.store_attn:
             self.attn = attn
         ## Add & Norm
-        src = src + self.dropout_attn(src2) # Add: residual connection with residual dropout
+        residual_update = self.dropout_attn(src2)
+        if self.attn_gate_mode == 'g_residual' and gate_token is not None:
+            residual_update = gate_token * residual_update
+        src = src + residual_update # Add: residual connection with residual dropout
         if not self.pre_norm:
             src = self.norm_attn(src)
 
@@ -284,7 +292,8 @@ class TSTEncoderLayer(nn.Module):
 
 
 class _MultiheadAttention(nn.Module):
-    def __init__(self, d_model, n_heads, d_k=None, d_v=None, res_attention=False, attn_dropout=0., proj_dropout=0., qkv_bias=True, lsa=False):
+    def __init__(self, d_model, n_heads, d_k=None, d_v=None, res_attention=False, attn_dropout=0., proj_dropout=0., qkv_bias=True, lsa=False,
+                 attn_gate_mode:str='none', attn_gate_init:float=2.0):
         """Multi Head Attention Layer
         Input shape:
             Q:       [batch_size (bs) x max_q_len x d_model]
@@ -307,6 +316,10 @@ class _MultiheadAttention(nn.Module):
 
         # Poject output
         self.to_out = nn.Sequential(nn.Linear(n_heads * d_v, d_model), nn.Dropout(proj_dropout))
+        self.attn_gate_mode = attn_gate_mode
+        self.gate_proj = nn.Linear(d_model, 1, bias=True)
+        self.gate_proj.weight.data.zero_()
+        self.gate_proj.bias.data.fill_(attn_gate_init)
 
 
     def forward(self, Q:Tensor, K:Optional[Tensor]=None, V:Optional[Tensor]=None, prev:Optional[Tensor]=None,
@@ -316,10 +329,25 @@ class _MultiheadAttention(nn.Module):
         if K is None: K = Q
         if V is None: V = Q
 
+        gate_token = None
+        gate_broadcast = None
+        gate_broadcast_k = None
+        if self.attn_gate_mode != 'none':
+            gate_token = torch.sigmoid(self.gate_proj(Q))
+            gate_broadcast = gate_token.unsqueeze(1)                       # [bs, 1, q_len, 1]
+            gate_broadcast_k = gate_token.unsqueeze(1).transpose(-2, -1)   # [bs, 1, 1, q_len]
+
         # Linear (+ split in multiple heads)
         q_s = self.W_Q(Q).view(bs, -1, self.n_heads, self.d_k).transpose(1,2)       # q_s    : [bs x n_heads x max_q_len x d_k]
         k_s = self.W_K(K).view(bs, -1, self.n_heads, self.d_k).permute(0,2,3,1)     # k_s    : [bs x n_heads x d_k x q_len] - transpose(1,2) + transpose(2,3)
         v_s = self.W_V(V).view(bs, -1, self.n_heads, self.d_v).transpose(1,2)       # v_s    : [bs x n_heads x q_len x d_v]
+
+        if self.attn_gate_mode == 'g_q' and gate_broadcast is not None:
+            q_s = q_s * gate_broadcast
+        if self.attn_gate_mode == 'g_k' and gate_broadcast_k is not None:
+            k_s = k_s * gate_broadcast_k
+        if self.attn_gate_mode == 'g_v' and gate_broadcast is not None:
+            v_s = v_s * gate_broadcast
 
         # Apply Scaled Dot-Product Attention (multiple heads)
         if self.res_attention:
@@ -328,12 +356,21 @@ class _MultiheadAttention(nn.Module):
             output, attn_weights = self.sdp_attn(q_s, k_s, v_s, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
         # output: [bs x n_heads x q_len x d_v], attn: [bs x n_heads x q_len x q_len], scores: [bs x n_heads x max_q_len x q_len]
 
+        if self.attn_gate_mode == 'g_sdpa_out' and gate_broadcast is not None:
+            output = output * gate_broadcast
+
         # back to the original inputs dimensions
         output = output.transpose(1, 2).contiguous().view(bs, -1, self.n_heads * self.d_v) # output: [bs x q_len x n_heads * d_v]
+
+        if self.attn_gate_mode == 'g_concat' and gate_token is not None:
+            output = output * gate_token
         output = self.to_out(output)
 
-        if self.res_attention: return output, attn_weights, attn_scores
-        else: return output, attn_weights
+        if self.attn_gate_mode == 'g_wo_out' and gate_token is not None:
+            output = output * gate_token
+
+        if self.res_attention: return output, attn_weights, attn_scores, gate_token
+        else: return output, attn_weights, gate_token
 
 
 class _ScaledDotProductAttention(nn.Module):
