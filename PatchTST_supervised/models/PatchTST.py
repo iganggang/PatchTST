@@ -45,29 +45,6 @@ class Model(nn.Module):
         decomposition = configs.decomposition
         kernel_size = configs.kernel_size
 
-        moe_mode = getattr(configs, 'moe_mode', None)
-        use_value_moe_arg = getattr(configs, 'use_value_moe', None)
-        use_ffn_moe_arg = getattr(configs, 'use_ffn_moe', None)
-
-        if moe_mode is None:
-            use_value_moe = True if use_value_moe_arg is None else bool(use_value_moe_arg)
-            use_ffn_moe = True if use_ffn_moe_arg is None else bool(use_ffn_moe_arg)
-            if use_value_moe and use_ffn_moe:
-                moe_mode = 'both'
-            elif use_value_moe and not use_ffn_moe:
-                moe_mode = 'value'
-            elif not use_value_moe and use_ffn_moe:
-                moe_mode = 'ffn'
-            else:
-                moe_mode = 'none'
-        else:
-            moe_mode = moe_mode.lower()
-            use_value_moe = moe_mode in ['value', 'both']
-            use_ffn_moe = moe_mode in ['ffn', 'both']
-
-        print(f"MoE config: moe_mode={moe_mode}, use_value_moe={use_value_moe}, use_ffn_moe={use_ffn_moe}")
-        
-        
         # model
         self.decomposition = decomposition
         if self.decomposition:
@@ -79,7 +56,7 @@ class Model(nn.Module):
                                   attn_mask=attn_mask, res_attention=res_attention, pre_norm=pre_norm, store_attn=store_attn,
                                   pe=pe, learn_pe=learn_pe, fc_dropout=fc_dropout, head_dropout=head_dropout, padding_patch = padding_patch,
                                   pretrain_head=pretrain_head, head_type=head_type, individual=individual, revin=revin, affine=affine,
-                                  subtract_last=subtract_last, verbose=verbose, use_value_moe=use_value_moe, use_ffn_moe=use_ffn_moe, **kwargs)
+                                  subtract_last=subtract_last, verbose=verbose, **kwargs)
             self.model_res = PatchTST_backbone(c_in=c_in, context_window = context_window, target_window=target_window, patch_len=patch_len, stride=stride,
                                   max_seq_len=max_seq_len, n_layers=n_layers, d_model=d_model,
                                   n_heads=n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff, norm=norm, attn_dropout=attn_dropout,
@@ -87,7 +64,7 @@ class Model(nn.Module):
                                   attn_mask=attn_mask, res_attention=res_attention, pre_norm=pre_norm, store_attn=store_attn,
                                   pe=pe, learn_pe=learn_pe, fc_dropout=fc_dropout, head_dropout=head_dropout, padding_patch = padding_patch,
                                   pretrain_head=pretrain_head, head_type=head_type, individual=individual, revin=revin, affine=affine,
-                                  subtract_last=subtract_last, verbose=verbose, use_value_moe=use_value_moe, use_ffn_moe=use_ffn_moe, **kwargs)
+                                  subtract_last=subtract_last, verbose=verbose, **kwargs)
         else:
             self.model = PatchTST_backbone(c_in=c_in, context_window = context_window, target_window=target_window, patch_len=patch_len, stride=stride,
                                   max_seq_len=max_seq_len, n_layers=n_layers, d_model=d_model,
@@ -96,20 +73,20 @@ class Model(nn.Module):
                                   attn_mask=attn_mask, res_attention=res_attention, pre_norm=pre_norm, store_attn=store_attn,
                                   pe=pe, learn_pe=learn_pe, fc_dropout=fc_dropout, head_dropout=head_dropout, padding_patch = padding_patch,
                                   pretrain_head=pretrain_head, head_type=head_type, individual=individual, revin=revin, affine=affine,
-                                  subtract_last=subtract_last, verbose=verbose, use_value_moe=use_value_moe, use_ffn_moe=use_ffn_moe, **kwargs)
+                                  subtract_last=subtract_last, verbose=verbose, **kwargs)
     
     
     def forward(self, x):           # x: [Batch, Input length, Channel]
         if self.decomposition:
             res_init, trend_init = self.decomp_module(x)
             res_init, trend_init = res_init.permute(0,2,1), trend_init.permute(0,2,1)  # x: [Batch, Channel, Input length]
-            res, aux1 = self.model_res(res_init)
-            trend, aux2 = self.model_trend(trend_init)
+            res = self.model_res(res_init)
+            trend = self.model_trend(trend_init)
             x = res + trend
             x = x.permute(0,2,1)    # x: [Batch, Input length, Channel]
-            return x, aux1 + aux2
+            return x
         else:
             x = x.permute(0,2,1)    # x: [Batch, Channel, Input length]
-            x, aux = self.model(x)
+            x = self.model(x)
             x = x.permute(0,2,1)    # x: [Batch, Input length, Channel]
-            return x, aux
+            return x

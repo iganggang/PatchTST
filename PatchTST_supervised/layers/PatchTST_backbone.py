@@ -20,8 +20,7 @@ class PatchTST_backbone(nn.Module):
                  padding_var:Optional[int]=None, attn_mask:Optional[Tensor]=None, res_attention:bool=True, pre_norm:bool=False, store_attn:bool=False,
                  pe:str='zeros', learn_pe:bool=True, fc_dropout:float=0., head_dropout = 0, padding_patch = None,
                  pretrain_head:bool=False, head_type = 'flatten', individual = False, revin = True, affine = True, subtract_last = False,
-                 verbose:bool=False, use_value_moe: bool = True, use_ffn_moe: bool = True,
-                 value_moe_experts: int = 4, ffn_moe_experts: int = 4, **kwargs):
+                 verbose:bool=False, **kwargs):
         
         super().__init__()
         
@@ -43,8 +42,7 @@ class PatchTST_backbone(nn.Module):
                                 n_layers=n_layers, d_model=d_model, n_heads=n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff,
                                 attn_dropout=attn_dropout, dropout=dropout, act=act, key_padding_mask=key_padding_mask, padding_var=padding_var,
                                 attn_mask=attn_mask, res_attention=res_attention, pre_norm=pre_norm, store_attn=store_attn,
-                                pe=pe, learn_pe=learn_pe, verbose=verbose, use_value_moe=use_value_moe, use_ffn_moe=use_ffn_moe,
-                                value_moe_experts=value_moe_experts, ffn_moe_experts=ffn_moe_experts, **kwargs)
+                                pe=pe, learn_pe=learn_pe, verbose=verbose, **kwargs)
 
         # Head
         self.head_nf = d_model * patch_num
@@ -73,7 +71,7 @@ class PatchTST_backbone(nn.Module):
         z = z.permute(0,1,3,2)                                                              # z: [bs x nvars x patch_len x patch_num]
         
         # model
-        z, aux_loss = self.backbone(z)                                                      # z: [bs x nvars x d_model x patch_num]
+        z = self.backbone(z)                                                                # z: [bs x nvars x d_model x patch_num]
         z = self.head(z)                                                                    # z: [bs x nvars x target_window]
         
         # denorm
@@ -81,7 +79,7 @@ class PatchTST_backbone(nn.Module):
             z = z.permute(0,2,1)
             z = self.revin_layer(z, 'denorm')
             z = z.permute(0,2,1)
-        return z, aux_loss
+        return z
     
     def create_pretrain_head(self, head_nf, vars, dropout):
         return nn.Sequential(nn.Dropout(dropout),
@@ -124,77 +122,8 @@ class Flatten_Head(nn.Module):
             x = self.dropout(x)
         return x
 
-
-
-class SwitchLinear(nn.Module):
-    """Switch-style linear layer with mixture of experts."""
-    def __init__(self, in_features, out_features, n_experts: int = 4):
-        super().__init__()
-        self.n_experts = n_experts
-        self.experts = nn.ModuleList([nn.Linear(in_features, out_features) for _ in range(n_experts)])
-        self.gate = nn.Linear(in_features, n_experts)
-
-    def forward(self, x):
-        gate_logits = self.gate(x)
-        gate = F.softmax(gate_logits, dim=-1)
-        top1 = gate.argmax(dim=-1)
-        one_hot = F.one_hot(top1, self.n_experts).to(x.dtype)
-        expert_outs = torch.stack([expert(x) for expert in self.experts], dim=-1)
-        out = (expert_outs * one_hot.unsqueeze(-2)).sum(-1)
-        meangate = gate.mean(dim=tuple(range(gate.dim() - 1)))
-        aux_loss = (meangate * self.n_experts).pow(2).mean()
-        return out, aux_loss
-
-
-class LinearValueEncoder(nn.Module):
-    """Standard linear projection used when value-side MoE is disabled."""
-
-    def __init__(self, in_features, out_features):
-        super().__init__()
-        self.linear = nn.Linear(in_features, out_features)
-
-    def forward(self, x):
-        out = self.linear(x)
-        aux_loss = torch.zeros((), device=x.device, dtype=x.dtype)
-        return out, aux_loss
-
-
-def build_value_encoder(use_value_moe: bool, in_features: int, out_features: int, n_experts: int = 4):
-    """Factory that builds either SwitchLinear or a plain Linear layer."""
-    if use_value_moe:
-        return SwitchLinear(in_features, out_features, n_experts=n_experts)
-    return LinearValueEncoder(in_features, out_features)
-
-
-class SwitchFeedForward(nn.Module):
-    """MoE feed-forward layer for Switch Transformer."""
-    def __init__(self, d_model, d_ff, n_experts: int = 4, dropout: float = 0., activation: str = "gelu"):
-        super().__init__()
-        self.n_experts = n_experts
-        self.experts = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(d_model, d_ff),
-                get_activation_fn(activation),
-                nn.Dropout(dropout),
-                nn.Linear(d_ff, d_model)
-            ) for _ in range(n_experts)
-        ])
-        self.gate = nn.Linear(d_model, n_experts)
-
-    def forward(self, x):
-        gate_logits = self.gate(x)
-        gate = F.softmax(gate_logits, dim=-1)
-        top1 = gate.argmax(dim=-1)
-        one_hot = F.one_hot(top1, self.n_experts).to(x.dtype)
-        expert_outs = torch.stack([expert(x) for expert in self.experts], dim=-1)
-        out = (expert_outs * one_hot.unsqueeze(-2)).sum(-1)
-        meangate = gate.mean(dim=(0, 1))
-        aux_loss = (meangate * self.n_experts).pow(2).mean()
-        return out, aux_loss
-
-
-class StandardFeedForward(nn.Module):
-    """Standard position-wise feed-forward network used when MoE is disabled."""
+class PositionwiseFeedForward(nn.Module):
+    """Standard position-wise feed-forward network."""
 
     def __init__(self, d_model, d_ff, dropout: float = 0., activation: str = "gelu"):
         super().__init__()
@@ -207,16 +136,7 @@ class StandardFeedForward(nn.Module):
         )
 
     def forward(self, x):
-        out = self.net(x)
-        aux_loss = torch.zeros((), device=x.device, dtype=x.dtype)
-        return out, aux_loss
-
-
-def build_ffn_layer(use_ffn_moe: bool, d_model: int, d_ff: int, n_experts: int = 4, dropout: float = 0., activation: str = "gelu"):
-    """Factory that builds either SwitchFeedForward or a standard FFN."""
-    if use_ffn_moe:
-        return SwitchFeedForward(d_model, d_ff, n_experts=n_experts, dropout=dropout, activation=activation)
-    return StandardFeedForward(d_model, d_ff, dropout=dropout, activation=activation)
+        return self.net(x)
 
 
 class TSTiEncoder(nn.Module):  #i means channel-independent
@@ -224,8 +144,7 @@ class TSTiEncoder(nn.Module):  #i means channel-independent
                  n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None,
                  d_ff=256, norm='BatchNorm', attn_dropout=0., dropout=0., act="gelu", store_attn=False,
                  key_padding_mask='auto', padding_var=None, attn_mask=None, res_attention=True, pre_norm=False,
-                 pe='zeros', learn_pe=True, verbose=False, use_value_moe: bool = True, use_ffn_moe: bool = True,
-                 value_moe_experts: int = 4, ffn_moe_experts: int = 4, **kwargs):
+                 pe='zeros', learn_pe=True, verbose=False, **kwargs):
         
         
         super().__init__()
@@ -235,7 +154,7 @@ class TSTiEncoder(nn.Module):  #i means channel-independent
 
         # Input encoding
         q_len = patch_num
-        self.W_P = build_value_encoder(use_value_moe, patch_len, d_model, n_experts=value_moe_experts)
+        self.W_P = nn.Linear(patch_len, d_model)
         self.seq_len = q_len
 
         # Positional encoding
@@ -247,7 +166,7 @@ class TSTiEncoder(nn.Module):  #i means channel-independent
         # Encoder
         self.encoder = TSTEncoder(q_len, d_model, n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff, norm=norm, attn_dropout=attn_dropout, dropout=dropout,
                                    pre_norm=pre_norm, activation=act, res_attention=res_attention, n_layers=n_layers,
-                                   store_attn=store_attn, use_ffn_moe=use_ffn_moe, ffn_moe_experts=ffn_moe_experts)
+                                   store_attn=store_attn)
 
         
     def forward(self, x) -> Tensor:                                              # x: [bs x nvars x patch_len x patch_num]
@@ -255,17 +174,17 @@ class TSTiEncoder(nn.Module):  #i means channel-independent
         n_vars = x.shape[1]
         # Input encoding
         x = x.permute(0,1,3,2)                                                   # x: [bs x nvars x patch_num x patch_len]
-        x, aux1 = self.W_P(x)                                                    # x: [bs x nvars x patch_num x d_model]
+        x = self.W_P(x)                                                          # x: [bs x nvars x patch_num x d_model]
 
         u = torch.reshape(x, (x.shape[0]*x.shape[1],x.shape[2],x.shape[3]))      # u: [bs * nvars x patch_num x d_model]
         u = self.dropout(u + self.W_pos)                                         # u: [bs * nvars x patch_num x d_model]
 
         # Encoder
-        z, aux2 = self.encoder(u)                                                # z: [bs * nvars x patch_num x d_model]
+        z = self.encoder(u)                                                      # z: [bs * nvars x patch_num x d_model]
         z = torch.reshape(z, (-1,n_vars,z.shape[-2],z.shape[-1]))                # z: [bs x nvars x patch_num x d_model]
         z = z.permute(0,1,3,2)                                                   # z: [bs x nvars x d_model x patch_num]
 
-        return z, aux1 + aux2
+        return z
             
             
     
@@ -273,38 +192,32 @@ class TSTiEncoder(nn.Module):  #i means channel-independent
 class TSTEncoder(nn.Module):
     def __init__(self, q_len, d_model, n_heads, d_k=None, d_v=None, d_ff=None,
                         norm='BatchNorm', attn_dropout=0., dropout=0., activation='gelu',
-                        res_attention=False, n_layers=1, pre_norm=False, store_attn=False,
-                        use_ffn_moe: bool = True, ffn_moe_experts: int = 4):
+                        res_attention=False, n_layers=1, pre_norm=False, store_attn=False):
         super().__init__()
 
         self.layers = nn.ModuleList([TSTEncoderLayer(q_len, d_model, n_heads=n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff, norm=norm,
                                                       attn_dropout=attn_dropout, dropout=dropout,
                                                       activation=activation, res_attention=res_attention,
-                                                      pre_norm=pre_norm, store_attn=store_attn,
-                                                      use_ffn_moe=use_ffn_moe, ffn_moe_experts=ffn_moe_experts) for i in range(n_layers)])
+                                                      pre_norm=pre_norm, store_attn=store_attn) for i in range(n_layers)])
         self.res_attention = res_attention
 
     def forward(self, src:Tensor, key_padding_mask:Optional[Tensor]=None, attn_mask:Optional[Tensor]=None):
         output = src
         scores = None
-        aux_loss = 0.0
         if self.res_attention:
             for mod in self.layers:
-                output, scores, l_aux = mod(output, prev=scores, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
-                aux_loss = aux_loss + l_aux
-            return output, aux_loss
+                output, scores = mod(output, prev=scores, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
+            return output
         else:
             for mod in self.layers:
-                output, l_aux = mod(output, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
-                aux_loss = aux_loss + l_aux
-            return output, aux_loss
+                output = mod(output, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
+            return output
 
 
 
 class TSTEncoderLayer(nn.Module):
     def __init__(self, q_len, d_model, n_heads, d_k=None, d_v=None, d_ff=256, store_attn=False,
-                 norm='BatchNorm', attn_dropout=0, dropout=0., bias=True, activation="gelu", res_attention=False, pre_norm=False,
-                 use_ffn_moe: bool = True, ffn_moe_experts: int = 4):
+                 norm='BatchNorm', attn_dropout=0, dropout=0., bias=True, activation="gelu", res_attention=False, pre_norm=False):
         super().__init__()
         assert not d_model%n_heads, f"d_model ({d_model}) must be divisible by n_heads ({n_heads})"
         d_k = d_model // n_heads if d_k is None else d_k
@@ -321,8 +234,8 @@ class TSTEncoderLayer(nn.Module):
         else:
             self.norm_attn = nn.LayerNorm(d_model)
 
-        # Position-wise Feed-Forward replaced with MoE
-        self.ff = build_ffn_layer(use_ffn_moe, d_model, d_ff, n_experts=ffn_moe_experts, dropout=dropout, activation=activation)
+        # Position-wise Feed-Forward
+        self.ff = PositionwiseFeedForward(d_model, d_ff, dropout=dropout, activation=activation)
 
         # Add & Norm
         self.dropout_ffn = nn.Dropout(dropout)
@@ -356,16 +269,16 @@ class TSTEncoderLayer(nn.Module):
         if self.pre_norm:
             src = self.norm_ffn(src)
         ## Position-wise Feed-Forward
-        src2, aux_loss = self.ff(src)
+        src2 = self.ff(src)
         ## Add & Norm
         src = src + self.dropout_ffn(src2) # Add: residual connection with residual dropout
         if not self.pre_norm:
             src = self.norm_ffn(src)
 
         if self.res_attention:
-            return src, scores, aux_loss
+            return src, scores
         else:
-            return src, aux_loss
+            return src
 
 
 
