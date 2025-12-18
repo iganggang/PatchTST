@@ -167,6 +167,8 @@ class TSTiEncoder(nn.Module):  #i means channel-independent
         self.encoder = TSTEncoder(q_len, d_model, n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff, norm=norm, attn_dropout=attn_dropout, dropout=dropout,
                                    pre_norm=pre_norm, activation=act, res_attention=res_attention, n_layers=n_layers,
                                    store_attn=store_attn, attn_gate_mode=attn_gate_mode, attn_gate_init=attn_gate_init)
+        self.latest_gate_tokens = []
+        self.latest_gate_stats = None
 
         
     def forward(self, x) -> Tensor:                                              # x: [bs x nvars x patch_len x patch_num]
@@ -184,7 +186,22 @@ class TSTiEncoder(nn.Module):  #i means channel-independent
         z = torch.reshape(z, (-1,n_vars,z.shape[-2],z.shape[-1]))                # z: [bs x nvars x patch_num x d_model]
         z = z.permute(0,1,3,2)                                                   # z: [bs x nvars x d_model x patch_num]
 
+        self.latest_gate_tokens = self.encoder.get_gate_tokens()
+        if self.latest_gate_tokens:
+            flat_gates = torch.cat([g.flatten() for g in self.latest_gate_tokens])
+            self.latest_gate_stats = {
+                'mean': flat_gates.mean().item(),
+                'std': flat_gates.std().item(),
+                'min': flat_gates.min().item(),
+                'max': flat_gates.max().item(),
+            }
+        else:
+            self.latest_gate_stats = None
+
         return z
+
+    def get_gate_statistics(self):
+        return self.latest_gate_stats
             
             
     
@@ -214,6 +231,13 @@ class TSTEncoder(nn.Module):
             for mod in self.layers:
                 output = mod(output, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
             return output
+
+    def get_gate_tokens(self):
+        gate_tokens = []
+        for mod in self.layers:
+            if getattr(mod, 'last_gate_token', None) is not None:
+                gate_tokens.append(mod.last_gate_token)
+        return gate_tokens
 
 
 
@@ -251,6 +275,8 @@ class TSTEncoderLayer(nn.Module):
         self.pre_norm = pre_norm
         self.store_attn = store_attn
         self.attn_gate_mode = attn_gate_mode
+        self.last_gate_token = None
+        self.last_gate_stats = None
 
 
     def forward(self, src:Tensor, prev:Optional[Tensor]=None, key_padding_mask:Optional[Tensor]=None, attn_mask:Optional[Tensor]=None) -> Tensor:
@@ -263,6 +289,8 @@ class TSTEncoderLayer(nn.Module):
             src2, attn, scores, gate_token = self.self_attn(src, src, src, prev, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
         else:
             src2, attn, gate_token = self.self_attn(src, src, src, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
+        self.last_gate_token = self.self_attn.get_gate_token()
+        self.last_gate_stats = self.self_attn.get_gate_stats()
         if self.store_attn:
             self.attn = attn
         ## Add & Norm
@@ -320,6 +348,8 @@ class _MultiheadAttention(nn.Module):
         self.gate_proj = nn.Linear(d_model, 1, bias=True)
         self.gate_proj.weight.data.zero_()
         self.gate_proj.bias.data.fill_(attn_gate_init)
+        self.last_gate_token = None
+        self.last_gate_stats = None
 
 
     def forward(self, Q:Tensor, K:Optional[Tensor]=None, V:Optional[Tensor]=None, prev:Optional[Tensor]=None,
@@ -336,6 +366,16 @@ class _MultiheadAttention(nn.Module):
             gate_token = torch.sigmoid(self.gate_proj(Q))
             gate_broadcast = gate_token.unsqueeze(1)                       # [bs, 1, q_len, 1]
             gate_broadcast_k = gate_token.unsqueeze(1).transpose(-2, -1)   # [bs, 1, 1, q_len]
+            self.last_gate_token = gate_token.detach()
+            self.last_gate_stats = {
+                'mean': self.last_gate_token.mean().item(),
+                'std': self.last_gate_token.std().item(),
+                'min': self.last_gate_token.min().item(),
+                'max': self.last_gate_token.max().item(),
+            }
+        else:
+            self.last_gate_token = None
+            self.last_gate_stats = None
 
         # Linear (+ split in multiple heads)
         q_s = self.W_Q(Q).view(bs, -1, self.n_heads, self.d_k).transpose(1,2)       # q_s    : [bs x n_heads x max_q_len x d_k]
@@ -371,6 +411,12 @@ class _MultiheadAttention(nn.Module):
 
         if self.res_attention: return output, attn_weights, attn_scores, gate_token
         else: return output, attn_weights, gate_token
+
+    def get_gate_token(self):
+        return self.last_gate_token
+
+    def get_gate_stats(self):
+        return self.last_gate_stats
 
 
 class _ScaledDotProductAttention(nn.Module):
