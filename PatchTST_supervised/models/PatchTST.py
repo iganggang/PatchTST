@@ -76,8 +76,8 @@ class Model(nn.Module):
                                   pe=pe, learn_pe=learn_pe, fc_dropout=fc_dropout, head_dropout=head_dropout, padding_patch = padding_patch,
                                   pretrain_head=pretrain_head, head_type=head_type, individual=individual, revin=revin, affine=affine,
                                   subtract_last=subtract_last, verbose=verbose, attn_gate_mode=attn_gate_mode, attn_gate_init=attn_gate_init, **kwargs)
-    
-    
+
+
     def forward(self, x):           # x: [Batch, Input length, Channel]
         if self.decomposition:
             res_init, trend_init = self.decomp_module(x)
@@ -86,9 +86,38 @@ class Model(nn.Module):
             trend = self.model_trend(trend_init)
             x = res + trend
             x = x.permute(0,2,1)    # x: [Batch, Input length, Channel]
+            self.latest_gate_stats = self._collect_gate_statistics()
+            if self.latest_gate_stats is not None:
+                return x, self.latest_gate_stats
             return x
         else:
             x = x.permute(0,2,1)    # x: [Batch, Channel, Input length]
             x = self.model(x)
             x = x.permute(0,2,1)    # x: [Batch, Input length, Channel]
+            self.latest_gate_stats = self._collect_gate_statistics()
+            if self.latest_gate_stats is not None:
+                return x, self.latest_gate_stats
             return x
+
+    def _collect_gate_statistics(self):
+        gate_stats = []
+        if self.decomposition:
+            if hasattr(self, 'model_res') and getattr(self.model_res, 'latest_gate_stats', None) is not None:
+                gate_stats.append(self.model_res.latest_gate_stats)
+            if hasattr(self, 'model_trend') and getattr(self.model_trend, 'latest_gate_stats', None) is not None:
+                gate_stats.append(self.model_trend.latest_gate_stats)
+        else:
+            if hasattr(self, 'model') and getattr(self.model, 'latest_gate_stats', None) is not None:
+                gate_stats.append(self.model.latest_gate_stats)
+
+        if not gate_stats:
+            return None
+
+        mean = np.mean([stat['mean'] for stat in gate_stats])
+        std = np.mean([stat['std'] for stat in gate_stats])
+        min_v = min([stat['min'] for stat in gate_stats])
+        max_v = max([stat['max'] for stat in gate_stats])
+        return {'mean': mean, 'std': std, 'min': min_v, 'max': max_v}
+
+    def get_gate_statistics(self):
+        return getattr(self, 'latest_gate_stats', None)

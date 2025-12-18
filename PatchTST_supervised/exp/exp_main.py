@@ -51,6 +51,16 @@ class Exp_Main(Exp_Basic):
         criterion = nn.MSELoss()
         return criterion
 
+    def _extract_output_and_gate(self, outputs):
+        gate_stats = None
+        if isinstance(outputs, tuple) and len(outputs) == 2:
+            maybe_gate = outputs[1]
+            if isinstance(maybe_gate, dict) and {'mean', 'std', 'min', 'max'}.issubset(set(maybe_gate.keys())):
+                outputs, gate_stats = outputs
+            else:
+                outputs = outputs[0]
+        return outputs, gate_stats
+
     def vali(self, vali_data, vali_loader, criterion):
         total_loss = []
         self.model.eval()
@@ -69,24 +79,20 @@ class Exp_Main(Exp_Basic):
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         if 'Linear' in self.args.model or 'TST' in self.args.model:
-                            outputs = self.model(batch_x)
-                            if isinstance(outputs, tuple):
-                                outputs = outputs[0]
+                            outputs, _ = self._extract_output_and_gate(self.model(batch_x))
                         else:
                             if self.args.output_attention:
-                                outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                                outputs, _ = self._extract_output_and_gate(self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark))
                             else:
-                                outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                                outputs, _ = self._extract_output_and_gate(self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark))
                 else:
                     if 'Linear' in self.args.model or 'TST' in self.args.model:
-                        outputs = self.model(batch_x)
-                        if isinstance(outputs, tuple):
-                            outputs = outputs[0]
+                        outputs, _ = self._extract_output_and_gate(self.model(batch_x))
                     else:
                         if self.args.output_attention:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                            outputs, _ = self._extract_output_and_gate(self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark))
                         else:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                            outputs, _ = self._extract_output_and_gate(self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark))
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, f_dim:]
                 batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
@@ -147,17 +153,16 @@ class Exp_Main(Exp_Basic):
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
                 # encoder - decoder
+                gate_stats = None
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         if 'Linear' in self.args.model or 'TST' in self.args.model:
-                            outputs = self.model(batch_x)
-                            if isinstance(outputs, tuple):
-                                outputs = outputs[0]
+                            outputs, gate_stats = self._extract_output_and_gate(self.model(batch_x))
                         else:
                             if self.args.output_attention:
-                                outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                                outputs, gate_stats = self._extract_output_and_gate(self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark))
                             else:
-                                outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                                outputs, gate_stats = self._extract_output_and_gate(self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark))
 
                         f_dim = -1 if self.args.features == 'MS' else 0
                         outputs = outputs[:, -self.args.pred_len:, f_dim:]
@@ -166,20 +171,21 @@ class Exp_Main(Exp_Basic):
                         train_loss.append(loss.item())
                 else:
                     if 'Linear' in self.args.model or 'TST' in self.args.model:
-                            outputs = self.model(batch_x)
-                            if isinstance(outputs, tuple):
-                                outputs = outputs[0]
+                            outputs, gate_stats = self._extract_output_and_gate(self.model(batch_x))
                     else:
                         if self.args.output_attention:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                            outputs, gate_stats = self._extract_output_and_gate(self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark))
                         else:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, batch_y)
+                            outputs, gate_stats = self._extract_output_and_gate(self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, batch_y))
                     # print(outputs.shape,batch_y.shape)
                     f_dim = -1 if self.args.features == 'MS' else 0
                     outputs = outputs[:, -self.args.pred_len:, f_dim:]
                     batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
                     loss = criterion(outputs, batch_y)
                     train_loss.append(loss.item())
+
+                if gate_stats is not None and (i == 0 or (i + 1) % 100 == 0):
+                    print("\tgate stats - mean: {mean:.4f} std: {std:.4f} min: {min:.4f} max: {max:.4f}".format(**gate_stats))
 
                 if (i + 1) % 100 == 0:
                     print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
@@ -253,25 +259,21 @@ class Exp_Main(Exp_Basic):
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         if 'Linear' in self.args.model or 'TST' in self.args.model:
-                            outputs = self.model(batch_x)
-                            if isinstance(outputs, tuple):
-                                outputs = outputs[0]
+                            outputs, _ = self._extract_output_and_gate(self.model(batch_x))
                         else:
                             if self.args.output_attention:
-                                outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                                outputs, _ = self._extract_output_and_gate(self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark))
                             else:
-                                outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                                outputs, _ = self._extract_output_and_gate(self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark))
                 else:
                     if 'Linear' in self.args.model or 'TST' in self.args.model:
-                            outputs = self.model(batch_x)
-                            if isinstance(outputs, tuple):
-                                outputs = outputs[0]
+                            outputs, _ = self._extract_output_and_gate(self.model(batch_x))
                     else:
                         if self.args.output_attention:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                            outputs, _ = self._extract_output_and_gate(self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark))
 
                         else:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                            outputs, _ = self._extract_output_and_gate(self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark))
 
                 f_dim = -1 if self.args.features == 'MS' else 0
                 # print(outputs.shape,batch_y.shape)
@@ -348,24 +350,20 @@ class Exp_Main(Exp_Basic):
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         if 'Linear' in self.args.model or 'TST' in self.args.model:
-                            outputs = self.model(batch_x)
-                            if isinstance(outputs, tuple):
-                                outputs = outputs[0]
+                            outputs, _ = self._extract_output_and_gate(self.model(batch_x))
                         else:
                             if self.args.output_attention:
-                                outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                                outputs, _ = self._extract_output_and_gate(self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark))
                             else:
-                                outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                                outputs, _ = self._extract_output_and_gate(self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark))
                 else:
                     if 'Linear' in self.args.model or 'TST' in self.args.model:
-                        outputs = self.model(batch_x)
-                        if isinstance(outputs, tuple):
-                            outputs = outputs[0]
+                        outputs, _ = self._extract_output_and_gate(self.model(batch_x))
                     else:
                         if self.args.output_attention:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                            outputs, _ = self._extract_output_and_gate(self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark))
                         else:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                            outputs, _ = self._extract_output_and_gate(self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark))
                 pred = outputs.detach().cpu().numpy()  # .squeeze()
                 preds.append(pred)
 
